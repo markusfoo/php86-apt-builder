@@ -1,0 +1,320 @@
+name: Build PHP 8.6 APT Repository (Ubuntu 22.04 / jammy)
+
+# ============================================================================
+# DAY-TO-DAY BUILD. Run this every time a new beta/RC drops.
+#
+# Unlike an earlier version of this pipeline, this workflow never fetches
+# or renames anything from Debian's 8.5 packaging, and never mentions
+# "8.5". It uses packaging/debian/ as committed in THIS repo (produced
+# once by bootstrap-packaging.yml -- see that file's header for why).
+# packaging/debian/ already says "php8.6" everywhere; this workflow only
+# ever bumps its changelog entry for the new tag being built.
+#
+# NOTHING HERE TOUCHES YOUR SERVER. Every job runs on GitHub's own
+# disposable machines. Your Hestia box is only touched when YOU run
+# `apt install` / `apt upgrade` against the repo this produces -- a
+# separate, manual, later decision made after you've seen smoke-test pass.
+#
+# If a new beta needs a packaging change Debian's 8.5-derived tree didn't
+# anticipate (new build-dep, renamed extension, changed rules logic), fix
+# it directly in packaging/debian/ in this repo and commit it -- that fix
+# is then permanent for every future run, the same way Remi Collet's own
+# changelog shows him landing one-off upstream-PR fixes into his spec file
+# release to release.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      php_tag:
+        description: "Git tag in php/php-src to build"
+        type: string
+        default: "php-8.6.0beta1"
+      target_series:
+        description: "PHP series being built -- must match packaging/debian/ (php8.6-*)"
+        type: string
+        default: "8.6"
+      pkg_upstream_version:
+        description: "Debian-ordered upstream version string (~ sorts before nothing, so ~beta1 < final)"
+        type: string
+        default: "8.6.0~beta1"
+      pkg_revision:
+        description: "Debian package revision suffix"
+        type: string
+        default: "1"
+      publish:
+        description: "Publish to your APT repo on GitHub Pages if build + smoke-test pass"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # needed to push the persistent apt-repo-state branch
+  pages: write
+
+env:
+  DISTRO_CODENAME: jammy   # hardcoded: the only target your Hestia server needs
+  PKG: php${{ inputs.target_series }}
+
+jobs:
+
+  # ==========================================================================
+  # JOB 1 -- verify the php-src tag exists, and that packaging/debian/ in
+  # this repo actually matches target_series, before doing anything else.
+  # ==========================================================================
+  resolve:
+    name: Resolve inputs
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Confirm php_tag exists in php/php-src
+        run: |
+          set -euo pipefail
+          if ! git ls-remote --exit-code --tags https://github.com/php/php-src.git "refs/tags/${{ inputs.php_tag }}" >/dev/null; then
+            echo "::error::Tag '${{ inputs.php_tag }}' not found in php/php-src."
+            exit 1
+          fi
+
+      - name: Confirm packaging/debian/ exists and matches target_series
+        run: |
+          set -euo pipefail
+          test -d packaging/debian || {
+            echo "::error::packaging/debian/ not found. Run bootstrap-packaging.yml once first (see its header comment)."
+            exit 1
+          }
+          if ! grep -q "^Package: ${PKG}-" packaging/debian/control; then
+            echo "::error::packaging/debian/control has no ${PKG}-* packages. Wrong target_series, or bootstrap wasn't run/merged for this series."
+            grep '^Package:' packaging/debian/control || true
+            exit 1
+          fi
+          echo "OK: packaging/debian/ matches ${PKG}."
+
+  # ==========================================================================
+  # JOB 2 -- assemble the source tree, bump changelog, validate WITHOUT
+  # compiling anything.
+  # ==========================================================================
+  prepare-and-validate:
+    name: Assemble + validate
+    needs: resolve
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install packaging toolchain
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential devscripts debhelper dpkg-dev equivs quilt \
+            git-buildpackage lintian pkg-php-tools re2c bison autoconf ca-certificates
+
+      # Debian's php-team packaging is usually cut against a newer Debian
+      # archive than jammy's 2022-era repos ship. ppa:ondrej/php is the
+      # same PPA already running php8.5 on your server -- it backports the
+      # library versions PHP's build needs, for jammy specifically.
+      - name: Add ppa:ondrej/php (backported build-libs for jammy)
+        run: |
+          set -eux
+          sudo add-apt-repository -y ppa:ondrej/php
+          sudo apt-get update
+
+      - name: Fetch PHP upstream source and build orig tarball
+        run: |
+          set -eux
+          git clone --branch "${{ inputs.php_tag }}" --depth 1 https://github.com/php/php-src.git src
+          rm -rf src/.git
+          ORIG_DIR="${PKG}-${{ inputs.pkg_upstream_version }}"
+          mv src "$ORIG_DIR"
+          tar --sort=name --owner=0 --group=0 -cJf "${PKG}_${{ inputs.pkg_upstream_version }}.orig.tar.xz" "$ORIG_DIR"
+          mkdir -p build-area
+          mv "${PKG}_${{ inputs.pkg_upstream_version }}.orig.tar.xz" "$ORIG_DIR" build-area/
+          cp -r packaging/debian "build-area/${ORIG_DIR}/debian"
+
+      - name: Add changelog entry for this build
+        working-directory: build-area/${{ env.PKG }}-${{ inputs.pkg_upstream_version }}
+        run: |
+          set -eux
+          export DEBEMAIL="ci@example.com"
+          export DEBFULLNAME="Custom PHP CI"
+          dch --package "$PKG" \
+              --newversion "${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}" \
+              --distribution "$DISTRO_CODENAME" --force-distribution \
+              "Build of ${{ inputs.php_tag }}."
+
+      # ---- validation stage: catch problems in seconds, not after a 20-40 min compile ----
+      - name: Validate build-dependencies resolve
+        working-directory: build-area/${{ env.PKG }}-${{ inputs.pkg_upstream_version }}
+        run: sudo apt-get build-dep --simulate .
+
+      - name: Validate source package structure
+        working-directory: build-area/${{ env.PKG }}-${{ inputs.pkg_upstream_version }}
+        run: dpkg-source -b .
+
+      - name: Lint the packaging
+        working-directory: build-area
+        run: |
+          set -eux
+          # lintian's flag names have shifted across versions -- if this
+          # syntax is stale on the runner's installed lintian, check the
+          # log; intent is "fail on real errors, allow warnings through".
+          lintian --fail-on error ./*.dsc
+
+      - name: Upload prepared + validated source tree
+        uses: actions/upload-artifact@v6
+        with:
+          name: prepared-source
+          path: build-area
+          if-no-files-found: error
+
+  # ==========================================================================
+  # JOB 3 -- only runs if validation passed. Actually compiles.
+  # ==========================================================================
+  build:
+    name: Compile .deb packages
+    needs: prepare-and-validate
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download prepared source
+        uses: actions/download-artifact@v6
+        with:
+          name: prepared-source
+          path: build-area
+
+      - name: Toolchain + ppa:ondrej/php
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential devscripts debhelper dpkg-dev equivs fakeroot pkg-php-tools re2c bison autoconf
+          sudo add-apt-repository -y ppa:ondrej/php
+          sudo apt-get update
+
+      - name: Install real build-dependencies and compile
+        working-directory: build-area/${{ env.PKG }}-${{ inputs.pkg_upstream_version }}
+        run: |
+          set -eux
+          sudo mk-build-deps -ir -t "apt-get -y --no-install-recommends" debian/control
+          dpkg-buildpackage -us -uc -b -j"$(nproc)"
+
+      - name: Collect built .deb files
+        run: |
+          set -eux
+          mkdir -p debs
+          find build-area -maxdepth 1 -name '*.deb' -exec mv {} debs/ \;
+          echo "Built $(ls -1 debs/*.deb | wc -l) package(s):"
+          ls -lh debs/
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: php-debs
+          path: debs/*.deb
+          if-no-files-found: error
+
+  # ==========================================================================
+  # JOB 4 -- only runs if the build succeeded. Proves the packages actually
+  # work, in a fresh disposable container -- never on your server.
+  # ==========================================================================
+  smoke-test:
+    name: Install in a clean container and sanity-check
+    needs: build
+    runs-on: ubuntu-22.04
+    container: ubuntu:22.04
+    steps:
+      - name: Check out this repo (for tests/smoke.sh, if you add one)
+        uses: actions/checkout@v5
+
+      - name: Download built .deb files
+        uses: actions/download-artifact@v6
+        with:
+          name: php-debs
+          path: debs
+
+      - name: Install and run checks
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends ./debs/*.deb || apt-get -f install -y
+          php${{ inputs.target_series }} -v
+          php${{ inputs.target_series }} -m
+          if command -v php${{ inputs.target_series }}-fpm >/dev/null 2>&1; then
+            php${{ inputs.target_series }}-fpm -t
+          fi
+          # Add tests/smoke.sh to this repo to check your own two products
+          # here -- it runs automatically if present, before anything publishes.
+          if [ -x tests/smoke.sh ]; then ./tests/smoke.sh; fi
+
+  # ==========================================================================
+  # JOB 5 -- only runs if smoke-test passed.
+  # ==========================================================================
+  publish:
+    name: Publish signed APT repo to GitHub Pages
+    needs: smoke-test
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download built .deb files
+        uses: actions/download-artifact@v6
+        with:
+          name: php-debs
+          path: debs
+
+      - name: Install reprepro + gnupg
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends reprepro gnupg git
+
+      - name: Import APT repo signing key
+        run: |
+          set -eux
+          echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --keyid-format=long | awk '/^sec/{print $2}' | cut -d/ -f2 | head -n1)
+          echo "KEYID=$KEYID" >> "$GITHUB_ENV"
+
+      # The repo lives permanently in its own branch, not the runner's temp
+      # filesystem -- otherwise every run would silently wipe every package
+      # from every previous run, and `apt upgrade` would have nothing to see.
+      - name: Check out (or create) the persistent apt-repo-state branch
+        run: |
+          set -eux
+          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$REMOTE" apt-repo-state >/dev/null; then
+            git clone --single-branch --branch apt-repo-state "$REMOTE" repo
+          else
+            mkdir repo && cd repo && git init -b apt-repo-state && cd ..
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add packages to the repo and push
+        working-directory: repo
+        run: |
+          set -eux
+          mkdir -p conf
+          cat > conf/distributions <<EOF
+          Origin: Custom PHP Builds
+          Label: custom-php
+          Codename: $DISTRO_CODENAME
+          Architectures: amd64 source
+          Components: main
+          Description: Self-built pre-release PHP packages
+          SignWith: ${KEYID}
+          EOF
+          reprepro includedeb "$DISTRO_CODENAME" ../debs/*.deb
+          gpg --export "${KEYID}" > apt-repo-signing-key.gpg
+          cat > index.html <<EOF
+          <html><body>
+          <h1>Custom PHP APT repository</h1>
+          <p>Codename: $DISTRO_CODENAME | Built from ${{ inputs.php_tag }}</p>
+          </body></html>
+          EOF
+          git config user.email "ci@example.com"
+          git config user.name "Custom PHP CI"
+          git add -A
+          git commit -m "Add ${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}" || echo "Nothing new to commit"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" 2>/dev/null || \
+            git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin apt-repo-state
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
