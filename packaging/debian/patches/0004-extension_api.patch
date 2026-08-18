@@ -6,14 +6,11 @@ Subject: extension_api
  configure.ac          | 5 ++++-
  scripts/php-config.in | 4 ++++
  2 files changed, 8 insertions(+), 1 deletion(-)
-
-diff --git a/configure.ac b/configure.ac
-index 8b80477..f6c3bc0 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -1355,12 +1355,14 @@ ZEND_MODULE_API_NO=$($EGREP '#define ZEND_MODULE_API_NO ' $srcdir/Zend/zend_modu
- 
- AC_SUBST(ZEND_MODULE_API_NO)
+@@ -1364,12 +1364,14 @@
+ dnl Build extension directory path.
+ ZEND_MODULE_API_NO=$($EGREP '#define ZEND_MODULE_API_NO ' $srcdir/Zend/zend_modules.h|"${SED}" 's/#define ZEND_MODULE_API_NO //')
  
 +DEBIAN_PHP_API=$ZEND_MODULE_API_NO
 +
@@ -27,7 +24,7 @@ index 8b80477..f6c3bc0 100644
    AS_VAR_IF([oldstyleextdir], [yes], [
      AS_VAR_IF([PHP_DEBUG], [1], [part1=debug], [part1=no-debug])
      AS_VAR_IF([PHP_THREAD_SAFETY], [yes], [part2=zts], [part2=non-zts])
-@@ -1484,6 +1486,7 @@ PHP_SUBST([CPPFLAGS])
+@@ -1493,6 +1495,7 @@
  PHP_SUBST([CXX])
  PHP_SUBST([CXXFLAGS])
  PHP_SUBST([CXXFLAGS_CLEAN])
@@ -35,11 +32,9 @@ index 8b80477..f6c3bc0 100644
  PHP_SUBST_OLD([EXTENSION_DIR])
  PHP_SUBST([EXTRA_LDFLAGS])
  PHP_SUBST([EXTRA_LDFLAGS_PROGRAM])
-diff --git a/scripts/php-config.in b/scripts/php-config.in
-index 59a6b14..3d4e0f1 100644
 --- a/scripts/php-config.in
 +++ b/scripts/php-config.in
-@@ -20,6 +20,7 @@ php_cli_binary=NONE
+@@ -20,6 +20,7 @@
  php_cgi_binary=NONE
  configure_options="@CONFIGURE_OPTIONS@"
  php_sapis="@PHP_INSTALLED_SAPIS@"
@@ -47,7 +42,7 @@ index 59a6b14..3d4e0f1 100644
  ini_dir="@EXPANDED_PHP_CONFIG_FILE_SCAN_DIR@"
  ini_path="@EXPANDED_PHP_CONFIG_FILE_PATH@"
  php_embed_type="@PHP_EMBED_TYPE@"
-@@ -72,6 +73,8 @@ case "$1" in
+@@ -72,6 +73,8 @@
    echo $php_embed_lib;;
  --php-binary)
    echo $php_binary;;
@@ -56,7 +51,7 @@ index 59a6b14..3d4e0f1 100644
  --php-sapis)
    echo $php_sapis;;
  --configure-options)
-@@ -101,6 +104,7 @@ Options:
+@@ -101,6 +104,7 @@
    --man-dir           [$man_dir]
    --php-binary        [$php_binary]
    --php-sapis         [$php_sapis]
