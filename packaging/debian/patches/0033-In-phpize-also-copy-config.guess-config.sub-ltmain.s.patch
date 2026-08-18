@@ -1,17 +1,8 @@
-From: =?utf-8?b?T25kxZllaiBTdXLDvQ==?= <ondrej@sury.org>
-Date: Sun, 18 Oct 2020 20:38:15 +0200
-Subject: In phpize, also copy config.guess, config.sub,
- ltmain.sh and shtool from their respective packages
-
----
- scripts/phpize.in | 12 ++++++++++--
- 1 file changed, 10 insertions(+), 2 deletions(-)
-
 --- a/scripts/phpize.in
 +++ b/scripts/phpize.in
 @@ -9,11 +9,18 @@
  builddir="`pwd`"
- SED="/bin/sed"
+ SED="@SED@"
  
 +libtool_version=$(dpkg-query -f'${Version}' -W libtool)
  aclocaldir="$prefix/share/aclocal"
@@ -38,3 +29,4 @@ Subject: In phpize, also copy config.guess, config.sub,
    (cd "$phpdir" && cp $FILES "$builddir")
  }
  
+
