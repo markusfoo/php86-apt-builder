@@ -292,7 +292,7 @@ ext_config     += $(foreach ext_ext,$(ext_EXTENSIONS),$($(ext_ext)_config))
 #$(info Enabled config $(ext_config))
 
 %:
-	dh $@ --with systemd --with apache2 --without=build-stamp --without autoreconf $(PARALLEL)
+	dh $@ --with apache2 --without=build-stamp --without autoreconf $(PARALLEL)
 
 PREPARE_FILES := $(addprefix debian/,$(shell cat debian/prepare-files))
 
