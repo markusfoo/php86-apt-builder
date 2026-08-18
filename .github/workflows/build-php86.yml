@@ -21,6 +21,31 @@ name: Build PHP 8.6 APT Repository (Ubuntu 22.04 / jammy)
 # is then permanent for every future run, the same way Remi Collet's own
 # changelog shows him landing one-off upstream-PR fixes into his spec file
 # release to release.
+#
+# ----------------------------------------------------------------------------
+# RELIABILITY HARDENING (added after run #3 died as `cancelled` at exactly
+# 6h 0m -- GitHub's default hard job timeout -- while stuck inside a plain
+# `apt-get update`):
+#
+#   1. Every job now has an explicit `timeout-minutes`, so a hung step fails
+#      fast (minutes, not 6 hours of burned runner time) with a clear log.
+#   2. Every job that touches apt drops a persistent apt.conf.d file first,
+#      giving Acquire::Retries / Acquire::*::Timeout / ForceIPv4 to every
+#      apt call in that job -- including ones you don't call directly, like
+#      the apt-get invoked internally by mk-build-deps or add-apt-repository.
+#   3. The specific calls most likely to sit on a dead TCP connection
+#      (apt-get update, add-apt-repository, git clone) are additionally
+#      wrapped in their own `timeout` + small retry loop, as a second line
+#      of defense on top of #2.
+#   4. Unneeded third-party apt sources preinstalled on GitHub's runner
+#      image (google-chrome, azure-cli) are stripped before `apt-get
+#      update`, since they are not needed to build PHP and only add extra
+#      mirrors that can stall the update.
+#   5. `DEBIAN_FRONTEND=noninteractive` is set workflow-wide so no dpkg/
+#      debconf prompt can ever silently block a headless runner.
+#   6. A `concurrency` group cancels a stale/stuck run automatically the
+#      moment you re-dispatch for the same tag, instead of requiring you to
+#      cancel it by hand first.
 # ============================================================================
 
 on:
@@ -51,9 +76,16 @@ permissions:
   contents: write   # needed to push the persistent apt-repo-state branch
   pages: write
 
+# Re-dispatching for the same tag/series cancels any run already stuck on
+# it, instead of leaving a hung run to burn hours in parallel with the fix.
+concurrency:
+  group: build-php-${{ github.event.inputs.target_series }}-${{ github.event.inputs.php_tag }}
+  cancel-in-progress: true
+
 env:
   DISTRO_CODENAME: jammy   # hardcoded: the only target your Hestia server needs
   PKG: php${{ inputs.target_series }}
+  DEBIAN_FRONTEND: noninteractive   # never let a dpkg/debconf prompt block a headless runner
 
 jobs:
 
@@ -64,20 +96,26 @@ jobs:
   resolve:
     name: Resolve inputs
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 
       - name: Confirm php_tag exists in php/php-src
         run: |
-          set -euo pipefail
-          if ! git ls-remote --exit-code --tags https://github.com/php/php-src.git "refs/tags/${{ inputs.php_tag }}" >/dev/null; then
-            echo "::error::Tag '${{ inputs.php_tag }}' not found in php/php-src."
-            exit 1
-          fi
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            if timeout 30 git ls-remote --exit-code --tags https://github.com/php/php-src.git "refs/tags/${{ inputs.php_tag }}" >/dev/null; then
+              exit 0
+            fi
+            echo "::warning::git ls-remote attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::Tag '${{ inputs.php_tag }}' not found in php/php-src (or GitHub was unreachable after 3 attempts)."
+          exit 1
 
       - name: Confirm packaging/debian/ exists and matches target_series
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           test -d packaging/debian || {
             echo "::error::packaging/debian/ not found. Run bootstrap-packaging.yml once first (see its header comment)."
             exit 1
@@ -97,13 +135,36 @@ jobs:
     name: Assemble + validate
     needs: resolve
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
+      - name: Configure apt for CI reliability (retries, timeouts, IPv4-only)
+        run: |
+          set -euxo pipefail
+          sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "15";
+          Acquire::https::Timeout "15";
+          Acquire::ForceIPv4 "true";
+          APT::Get::Assume-Yes "true";
+          EOF
+          # Drop preinstalled third-party sources we don't need for a PHP
+          # build -- fewer mirrors to query means fewer chances to stall.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/azure-cli.list
+
       - name: Install packaging toolchain
         run: |
-          set -eux
-          sudo apt-get update
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update failed after 3 attempts."; exit 1; }
+          done
           sudo apt-get install -y --no-install-recommends \
             build-essential devscripts debhelper dpkg-dev equivs quilt \
             git-buildpackage lintian pkg-php-tools re2c bison autoconf ca-certificates
@@ -114,14 +175,36 @@ jobs:
       # library versions PHP's build needs, for jammy specifically.
       - name: Add ppa:ondrej/php (backported build-libs for jammy)
         run: |
-          set -eux
-          sudo add-apt-repository -y ppa:ondrej/php
-          sudo apt-get update
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 60 add-apt-repository -y ppa:ondrej/php; then
+              break
+            fi
+            echo "::warning::add-apt-repository attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::add-apt-repository failed after 3 attempts."; exit 1; }
+          done
+          for attempt in 1 2 3; do
+            if sudo timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update (post-PPA) attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update (post-PPA) failed after 3 attempts."; exit 1; }
+          done
 
       - name: Fetch PHP upstream source and build orig tarball
         run: |
-          set -eux
-          git clone --branch "${{ inputs.php_tag }}" --depth 1 https://github.com/php/php-src.git src
+          set -euxo pipefail
+          for attempt in 1 2; do
+            if timeout 300 git clone --branch "${{ inputs.php_tag }}" --depth 1 https://github.com/php/php-src.git src; then
+              break
+            fi
+            echo "::warning::git clone attempt ${attempt} failed or hung, retrying in 5s..."
+            rm -rf src
+            sleep 5
+            [ "$attempt" -eq 2 ] && { echo "::error::git clone of php-src failed after 2 attempts."; exit 1; }
+          done
           rm -rf src/.git
           ORIG_DIR="${PKG}-${{ inputs.pkg_upstream_version }}"
           mv src "$ORIG_DIR"
@@ -133,7 +216,7 @@ jobs:
       - name: Add changelog entry for this build
         working-directory: build-area/${{ env.PKG }}-${{ inputs.pkg_upstream_version }}
         run: |
-          set -eux
+          set -euxo pipefail
           export DEBEMAIL="ci@example.com"
           export DEBFULLNAME="Custom PHP CI"
           dch -b --package "$PKG" \
@@ -144,7 +227,7 @@ jobs:
       # ---- validation stage: catch problems in seconds, not after a 20-40 min compile ----
       - name: Validate build-dependencies resolve
         working-directory: build-area/${{ env.PKG }}-${{ inputs.pkg_upstream_version }}
-        run: sudo apt-get build-dep --simulate .
+        run: timeout 120 sudo apt-get build-dep --simulate .
 
       - name: Validate source package structure
         working-directory: build-area/${{ env.PKG }}-${{ inputs.pkg_upstream_version }}
@@ -153,7 +236,7 @@ jobs:
       - name: Lint the packaging
         working-directory: build-area
         run: |
-          set -eux
+          set -euxo pipefail
           # lintian's flag names have shifted across versions -- if this
           # syntax is stale on the runner's installed lintian, check the
           # log; intent is "fail on real errors, allow warnings through".
@@ -173,6 +256,7 @@ jobs:
     name: Compile .deb packages
     needs: prepare-and-validate
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
     steps:
       - name: Download prepared source
         uses: actions/download-artifact@v6
@@ -180,25 +264,65 @@ jobs:
           name: prepared-source
           path: build-area
 
+      - name: Configure apt for CI reliability (retries, timeouts, IPv4-only)
+        run: |
+          set -euxo pipefail
+          sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "15";
+          Acquire::https::Timeout "15";
+          Acquire::ForceIPv4 "true";
+          APT::Get::Assume-Yes "true";
+          EOF
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/azure-cli.list
+
       - name: Toolchain + ppa:ondrej/php
         run: |
-          set -eux
-          sudo apt-get update
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update failed after 3 attempts."; exit 1; }
+          done
           sudo apt-get install -y --no-install-recommends \
             build-essential devscripts debhelper dpkg-dev equivs fakeroot pkg-php-tools re2c bison autoconf
-          sudo add-apt-repository -y ppa:ondrej/php
-          sudo apt-get update
+          for attempt in 1 2 3; do
+            if sudo timeout 60 add-apt-repository -y ppa:ondrej/php; then
+              break
+            fi
+            echo "::warning::add-apt-repository attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::add-apt-repository failed after 3 attempts."; exit 1; }
+          done
+          for attempt in 1 2 3; do
+            if sudo timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update (post-PPA) attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update (post-PPA) failed after 3 attempts."; exit 1; }
+          done
 
+      # mk-build-deps / dpkg-buildpackage call apt-get internally; they
+      # automatically inherit the Acquire::Retries/Timeout/ForceIPv4
+      # settings dropped into /etc/apt/apt.conf.d above, so no extra flags
+      # are needed here. Compilation itself is intentionally NOT wrapped in
+      # a short `timeout` -- it can legitimately run long; the job-level
+      # `timeout-minutes: 120` above is the outer safety net for it.
       - name: Install real build-dependencies and compile
         working-directory: build-area/${{ env.PKG }}-${{ inputs.pkg_upstream_version }}
         run: |
-          set -eux
+          set -euxo pipefail
           sudo mk-build-deps -ir -t "apt-get -y --no-install-recommends" debian/control
           dpkg-buildpackage -us -uc -b -j"$(nproc)"
 
       - name: Collect built .deb files
         run: |
-          set -eux
+          set -euxo pipefail
           mkdir -p debs
           find build-area -maxdepth 1 -name '*.deb' -exec mv {} debs/ \;
           echo "Built $(ls -1 debs/*.deb | wc -l) package(s):"
@@ -219,6 +343,7 @@ jobs:
     name: Install in a clean container and sanity-check
     needs: build
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     container: ubuntu:22.04
     steps:
       - name: Check out this repo (for tests/smoke.sh, if you add one)
@@ -230,10 +355,29 @@ jobs:
           name: php-debs
           path: debs
 
+      - name: Configure apt for CI reliability (retries, timeouts, IPv4-only)
+        run: |
+          set -euxo pipefail
+          mkdir -p /etc/apt/apt.conf.d
+          tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "15";
+          Acquire::https::Timeout "15";
+          Acquire::ForceIPv4 "true";
+          APT::Get::Assume-Yes "true";
+          EOF
+
       - name: Install and run checks
         run: |
-          set -eux
-          apt-get update
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            if timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update failed after 3 attempts."; exit 1; }
+          done
           apt-get install -y --no-install-recommends ./debs/*.deb || apt-get -f install -y
           php${{ inputs.target_series }} -v
           php${{ inputs.target_series }} -m
@@ -252,6 +396,7 @@ jobs:
     needs: smoke-test
     if: ${{ inputs.publish }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - name: Download built .deb files
         uses: actions/download-artifact@v6
@@ -259,15 +404,33 @@ jobs:
           name: php-debs
           path: debs
 
+      - name: Configure apt for CI reliability (retries, timeouts, IPv4-only)
+        run: |
+          set -euxo pipefail
+          sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "15";
+          Acquire::https::Timeout "15";
+          Acquire::ForceIPv4 "true";
+          APT::Get::Assume-Yes "true";
+          EOF
+
       - name: Install reprepro + gnupg
         run: |
-          set -eux
-          sudo apt-get update
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update failed after 3 attempts."; exit 1; }
+          done
           sudo apt-get install -y --no-install-recommends reprepro gnupg git
 
       - name: Import APT repo signing key
         run: |
-          set -eux
+          set -euxo pipefail
           echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
           KEYID=$(gpg --list-secret-keys --keyid-format=long | awk '/^sec/{print $2}' | cut -d/ -f2 | head -n1)
           echo "KEYID=$KEYID" >> "$GITHUB_ENV"
@@ -277,10 +440,10 @@ jobs:
       # from every previous run, and `apt upgrade` would have nothing to see.
       - name: Check out (or create) the persistent apt-repo-state branch
         run: |
-          set -eux
+          set -euxo pipefail
           REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git ls-remote --exit-code --heads "$REMOTE" apt-repo-state >/dev/null; then
-            git clone --single-branch --branch apt-repo-state "$REMOTE" repo
+          if timeout 30 git ls-remote --exit-code --heads "$REMOTE" apt-repo-state >/dev/null; then
+            timeout 60 git clone --single-branch --branch apt-repo-state "$REMOTE" repo
           else
             mkdir repo && cd repo && git init -b apt-repo-state && cd ..
           fi
@@ -290,7 +453,7 @@ jobs:
       - name: Add packages to the repo and push
         working-directory: repo
         run: |
-          set -eux
+          set -euxo pipefail
           mkdir -p conf
           cat > conf/distributions <<EOF
           Origin: Custom PHP Builds
@@ -315,6 +478,6 @@ jobs:
           git commit -m "Add ${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}" || echo "Nothing new to commit"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" 2>/dev/null || \
             git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push origin apt-repo-state
+          timeout 60 git push origin apt-repo-state
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
