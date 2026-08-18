@@ -6,6 +6,7 @@ Uploaders: Ondřej Surý <ondrej@debian.org>,
            Lior Kaplan <kaplan@debian.org>
 Build-Depends: debhelper (>= 9.20160709~),
                dh-apache2,
+               dh-systemd,
                dpkg-dev (>= 1.16.1~),
                apache2-bin (>= 2.4),
                apache2-dev (>= 2.4),
