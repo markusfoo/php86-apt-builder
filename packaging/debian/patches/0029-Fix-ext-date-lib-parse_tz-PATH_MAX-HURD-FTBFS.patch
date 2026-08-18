@@ -5,14 +5,11 @@ Subject: Fix ext/date/lib/parse_tz PATH_MAX HURD FTBFS
 ---
  ext/date/lib/parse_tz.c | 4 ++++
  1 file changed, 4 insertions(+)
-
-diff --git a/ext/date/lib/parse_tz.c b/ext/date/lib/parse_tz.c
-index 88a746c..2f958ed 100644
 --- a/ext/date/lib/parse_tz.c
 +++ b/ext/date/lib/parse_tz.c
-@@ -43,6 +43,10 @@
- 
- #include <ctype.h>
+@@ -30,6 +30,10 @@
+ #define TIMELIB_SUPPORT_SLIM_FILE
+ #include "timezonedb.h"
  
 +#if !defined(PATH_MAX)
 +#define PATH_MAX 4096
