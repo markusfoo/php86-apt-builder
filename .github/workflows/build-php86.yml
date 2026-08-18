@@ -136,7 +136,7 @@ jobs:
           set -eux
           export DEBEMAIL="ci@example.com"
           export DEBFULLNAME="Custom PHP CI"
-          dch --package "$PKG" \
+          dch -b --package "$PKG" \
               --newversion "${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}" \
               --distribution "$DISTRO_CODENAME" --force-distribution \
               "Build of ${{ inputs.php_tag }}."
