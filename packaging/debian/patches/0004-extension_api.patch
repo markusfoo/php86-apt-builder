@@ -1,16 +1,8 @@
-From: Debian PHP Maintainers <pkg-php-maint@lists.alioth.debian.org>
-Date: Sat, 2 May 2015 10:26:51 +0200
-Subject: extension_api
-
----
- configure.ac          | 5 ++++-
- scripts/php-config.in | 4 ++++
- 2 files changed, 8 insertions(+), 1 deletion(-)
 --- a/configure.ac
 +++ b/configure.ac
-@@ -1364,12 +1364,14 @@
- dnl Build extension directory path.
- ZEND_MODULE_API_NO=$($EGREP '#define ZEND_MODULE_API_NO ' $srcdir/Zend/zend_modules.h|"${SED}" 's/#define ZEND_MODULE_API_NO //')
+@@ -1368,12 +1368,14 @@
+ 
+ AC_SUBST(ZEND_MODULE_API_NO)
  
 +DEBIAN_PHP_API=$ZEND_MODULE_API_NO
 +
@@ -24,7 +16,7 @@ Subject: extension_api
    AS_VAR_IF([oldstyleextdir], [yes], [
      AS_VAR_IF([PHP_DEBUG], [1], [part1=debug], [part1=no-debug])
      AS_VAR_IF([PHP_THREAD_SAFETY], [yes], [part2=zts], [part2=non-zts])
-@@ -1493,6 +1495,7 @@
+@@ -1497,6 +1499,7 @@
  PHP_SUBST([CXX])
  PHP_SUBST([CXXFLAGS])
  PHP_SUBST([CXXFLAGS_CLEAN])
@@ -32,6 +24,7 @@ Subject: extension_api
  PHP_SUBST_OLD([EXTENSION_DIR])
  PHP_SUBST([EXTRA_LDFLAGS])
  PHP_SUBST([EXTRA_LDFLAGS_PROGRAM])
+
 --- a/scripts/php-config.in
 +++ b/scripts/php-config.in
 @@ -20,6 +20,7 @@
@@ -59,3 +52,4 @@ Subject: extension_api
    --ini-path          [$ini_path]
    --ini-dir           [$ini_dir]
    --configure-options [$configure_options]
+
