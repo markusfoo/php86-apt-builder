@@ -86,6 +86,10 @@ env:
   DISTRO_CODENAME: jammy   # hardcoded: the only target your Hestia server needs
   PKG: php${{ inputs.target_series }}
   DEBIAN_FRONTEND: noninteractive   # never let a dpkg/debconf prompt block a headless runner
+  # Suppress Node.js 20 deprecation warning from actions/upload-artifact@v6
+  # and actions/download-artifact@v6 (still compiled for Node 20 as of
+  # 2026-08). Remove once v7+ with Node 24 support is released.
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
 
@@ -264,6 +268,28 @@ jobs:
           name: prepared-source
           path: build-area
 
+      # actions/upload-artifact -> download-artifact does NOT preserve
+      # Unix file permissions (the zip format has no mandatory +x bit).
+      # buildconf, configure, debian/rules etc. all lose +x, causing
+      # "Permission denied" (exit 126) during dpkg-buildpackage.
+      - name: Restore executable permissions lost during artifact round-trip
+        run: |
+          set -euxo pipefail
+          find build-area -type f \( \
+            -name 'buildconf' -o \
+            -name 'configure' -o \
+            -name 'install-sh' -o \
+            -name 'mkinstalldirs' -o \
+            -name 'libtool' -o \
+            -name 'ltmain.sh' -o \
+            -name '*.sh' -o \
+            -name 'run-tests.php' -o \
+            -name 'debian/rules' \
+          \) -exec chmod +x {} +
+          echo "Restored +x on critical build scripts:"
+          find build-area -name 'buildconf' -ls || true
+          find build-area -name 'debian/rules' -ls || true
+
       - name: Configure apt for CI reliability (retries, timeouts, IPv4-only)
         run: |
           set -euxo pipefail
@@ -277,7 +303,7 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
                      /etc/apt/sources.list.d/azure-cli.list
 
-      - name: Toolchain + ppa:ondrej/php
+      - name: Install build toolchain
         run: |
           set -euxo pipefail
           for attempt in 1 2 3; do
@@ -290,6 +316,26 @@ jobs:
           done
           sudo apt-get install -y --no-install-recommends \
             build-essential devscripts debhelper dpkg-dev equivs fakeroot pkg-php-tools re2c bison autoconf
+
+      # The greedy '%:' catch-all rule in debian/rules matches
+      # /usr/lib/php/php-common.mk (included via -include) as a make
+      # target, causing "dh: error: Unknown sequence" because $@
+      # expands to the file path instead of binary/clean/etc.
+      # Add an explicit no-op guard rule so make never reaches %:
+      # for that path.
+      - name: Fix dh Unknown sequence error in debian/rules
+        run: |
+          set -euxo pipefail
+          for rules in build-area/*/debian/rules; do
+            if [ -f "$rules" ] && grep -q '^%:' "$rules"; then
+              sed -i '/^%:/i /usr/lib/php/php-common.mk: ;' "$rules"
+              echo "Patched: $rules - added guard rule for php-common.mk"
+            fi
+          done
+
+      - name: Add ppa:ondrej/php
+        run: |
+          set -euxo pipefail
           for attempt in 1 2 3; do
             if sudo timeout 60 add-apt-repository -y ppa:ondrej/php; then
               break
