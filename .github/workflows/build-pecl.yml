@@ -1,0 +1,87 @@
+name: Build PECL (Imagick, Redis) for PHP 8.6
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-pecl:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install custom PHP 8.6 and build dependencies
+        run: |
+          echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 --decode | gpg --import
+          gpg --export --armor > /usr/share/keyrings/custom-php.gpg
+          echo "deb [signed-by=/usr/share/keyrings/custom-php.gpg] https://markusfoo.github.io/php86-apt-builder jammy main" | sudo tee /etc/apt/sources.list.d/custom-php.list
+          
+          sudo apt-get update
+          sudo apt-get install -y php8.6-dev php8.6-common php-pear libmagickwand-dev libssl-dev reprepro git
+
+      - name: Build and patch Imagick
+        run: |
+          git clone https://github.com/Imagick/imagick.git /tmp/imagick
+          cd /tmp/imagick
+          
+          sed -i 's/zend_is_callable(user_callback, 0, NULL TSRMLS_CC)/zend_is_callable_ex(user_callback, NULL, 0, NULL, NULL, NULL)/g' imagick_class.c
+          
+          phpize8.6
+          ./configure --with-php-config=/usr/bin/php-config8.6
+          make -j$(nproc)
+          
+          EXT_DIR=$(php-config8.6 --extension-dir)
+          mkdir -p /tmp/imagick-pkg/DEBIAN
+          mkdir -p "/tmp/imagick-pkg${EXT_DIR}"
+          cp modules/imagick.so "/tmp/imagick-pkg${EXT_DIR}/"
+          
+          cat <<EOF > /tmp/imagick-pkg/DEBIAN/control
+          Package: php8.6-imagick
+          Version: 3.7.0-8.6custom1
+          Architecture: amd64
+          Maintainer: markusfoo
+          Depends: php8.6-common, libmagickwand-6.q16-6
+          Description: Imagick extension for PHP 8.6 (Patched)
+          EOF
+          
+          dpkg-deb --build /tmp/imagick-pkg php8.6-imagick.deb
+
+      - name: Build Redis
+        run: |
+          git clone https://github.com/phpredis/phpredis.git /tmp/phpredis
+          cd /tmp/phpredis
+          
+          phpize8.6
+          ./configure --with-php-config=/usr/bin/php-config8.6
+          make -j$(nproc)
+          
+          EXT_DIR=$(php-config8.6 --extension-dir)
+          mkdir -p /tmp/redis-pkg/DEBIAN
+          mkdir -p "/tmp/redis-pkg${EXT_DIR}"
+          cp modules/redis.so "/tmp/redis-pkg${EXT_DIR}/"
+          
+          cat <<EOF > /tmp/redis-pkg/DEBIAN/control
+          Package: php8.6-redis
+          Version: 6.0.0-8.6custom1
+          Architecture: amd64
+          Maintainer: markusfoo
+          Depends: php8.6-common
+          Description: Redis extension for PHP 8.6
+          EOF
+          
+          dpkg-deb --build /tmp/redis-pkg php8.6-redis.deb
+
+      - name: Publish to APT repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git fetch origin apt-repo-state
+          git checkout apt-repo-state
+          
+          reprepro -b . includedeb jammy php8.6-imagick.deb
+          reprepro -b . includedeb jammy php8.6-redis.deb
+          
+          git add -A
+          git commit -m "Add imagick (patched) and redis for PHP 8.6"
+          git push origin apt-repo-state
