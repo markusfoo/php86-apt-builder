@@ -27,9 +27,9 @@ index 12be727..ef275a5 100644
 @@ -1301,7 +1301,7 @@ session.save_handler = files
  ; where MODE is the octal representation of the mode. Note that this
  ; does not overwrite the process's umask.
- ; https://php.net/session.save-path
--;session.save_path = "/tmp"
-+;session.save_path = "/var/lib/php/sessions"
- 
- ; Whether to use strict session mode.
- ; Strict session mode does not accept an uninitialized session ID, and
+ ; https://php.net/session.save-path 
+-;session.save_path = "/tmp" 
++;session.save_path = "/var/lib/php/sessions" 
+  
+ ; Whether to use strict session mode. 
+ ; Strict session mode does not accept an uninitialized session ID, and 
