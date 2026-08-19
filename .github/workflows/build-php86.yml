@@ -153,6 +153,17 @@ jobs:
           # build -- fewer mirrors to query means fewer chances to stall.
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
                      /etc/apt/sources.list.d/azure-cli.list
+          # Bypass the Azure regional package mirror. GitHub's ubuntu-22.04
+          # image resolves the main Ubuntu archive via
+          # mirror+file:/etc/apt/apt-mirrors.txt, which tries
+          # azure.archive.ubuntu.com first. That mirror is currently
+          # slow/unresponsive, so apt-get update stalls past our 60s
+          # per-attempt timeout before it ever falls back to the working
+          # archive.ubuntu.com host. Point the mirrorlist straight at the
+          # canonical archive to skip the stall entirely.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            echo "https://archive.ubuntu.com/ubuntu" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
 
       - name: Install packaging toolchain
         run: |
@@ -302,6 +313,11 @@ jobs:
           EOF
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
                      /etc/apt/sources.list.d/azure-cli.list
+          # Bypass the flaky azure.archive.ubuntu.com mirror -- see comment
+          # in the earlier "Configure apt for CI reliability" step.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            echo "https://archive.ubuntu.com/ubuntu" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
 
       - name: Install build toolchain
         run: |
@@ -541,6 +557,15 @@ jobs:
           Acquire::ForceIPv4 "true";
           APT::Get::Assume-Yes "true";
           EOF
+          # Drop preinstalled third-party sources we don't need here --
+          # fewer mirrors to query means fewer chances to stall.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/azure-cli.list
+          # Bypass the flaky azure.archive.ubuntu.com mirror -- see comment
+          # in the "Assemble + validate" job's identical step.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            echo "https://archive.ubuntu.com/ubuntu" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
 
       - name: Install reprepro + gnupg
         run: |
