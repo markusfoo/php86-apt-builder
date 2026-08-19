@@ -460,6 +460,40 @@ jobs:
             [ "$attempt" -eq 3 ] && { echo "::error::apt-get update (post-PPA) failed after 3 attempts."; exit 1; }
           done
 
+      - name: "Add PGDG apt repository (runtime dependency: libpq5 >= 17~)"
+        # The `build` job runs directly on the `ubuntu-22.04` GitHub-hosted
+        # runner, whose image ships a preinstalled, much newer PostgreSQL
+        # client toolchain than what's in Ubuntu jammy's own repos. That's
+        # what php8.6-pgsql actually links against, so dh_shlibdeps records
+        # "Depends: libpq5 (>= 17~)" in the built package.
+        #
+        # This job, in contrast, runs inside a bare `ubuntu:22.04` container,
+        # which only has jammy's stock libpq5 (14.x) -- and ppa:ondrej/php
+        # doesn't carry libpq5 either, that's the Postgres team's package,
+        # not the PHP team's. Without the official PGDG apt repo here, apt
+        # can't satisfy that >= 17~ requirement and php8.6-pgsql fails to
+        # install with "Depends: libpq5 (>= 17~~) but it is not going to be
+        # installed".
+        run: |
+          set -euxo pipefail
+          apt-get install -y --no-install-recommends postgresql-common
+          for attempt in 1 2 3; do
+            if timeout 60 /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y; then
+              break
+            fi
+            echo "::warning::PGDG repo setup attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::PGDG repo setup failed after 3 attempts."; exit 1; }
+          done
+          for attempt in 1 2 3; do
+            if timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update (post-PGDG) attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update (post-PGDG) failed after 3 attempts."; exit 1; }
+          done
+
       - name: Install and run checks
         run: |
           set -euxo pipefail
