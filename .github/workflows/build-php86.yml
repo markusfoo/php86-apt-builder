@@ -396,6 +396,14 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     container: ubuntu:22.04
+    # Container jobs default to `sh`, not `bash`, even when the image has
+    # bash installed -- this breaks every `set -euxo pipefail` run step
+    # below (`sh: 1: set: Illegal option -o pipefail`). Force bash
+    # explicitly to match the shell every other job in this workflow gets
+    # for free from runs-on: ubuntu-22.04.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Check out this repo (for tests/smoke.sh, if you add one)
         uses: actions/checkout@v5
