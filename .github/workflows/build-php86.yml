@@ -557,7 +557,9 @@ jobs:
         run: |
           set -euxo pipefail
 
-          VERSION_TAG="php${{ inputs.target_series }}-v${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}"
+          # Sanitize version for git tag: ~ is not allowed in tag names
+          SAFE_VERSION=$(echo "${{ inputs.pkg_upstream_version }}" | tr '~' '-')
+          VERSION_TAG="php${{ inputs.target_series }}-v${SAFE_VERSION}-${{ inputs.pkg_revision }}"
           RELEASE_NAME="PHP ${{ inputs.target_series }} ${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}"
 
           RELEASE_BODY=$(cat <<BODY_EOF
