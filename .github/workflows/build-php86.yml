@@ -286,6 +286,7 @@ jobs:
             -name 'run-tests.php' -o \
             -name 'shtool' -o \
             -name 'config-stubs' -o \
+            -name 'gen_stub.php' -o \
             -name 'debian/rules' \
           \) -exec chmod +x {} +
           echo "Restored +x on critical build scripts:"
