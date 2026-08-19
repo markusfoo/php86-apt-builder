@@ -86,10 +86,6 @@ env:
   DISTRO_CODENAME: jammy   # hardcoded: the only target your Hestia server needs
   PKG: php${{ inputs.target_series }}
   DEBIAN_FRONTEND: noninteractive   # never let a dpkg/debconf prompt block a headless runner
-  # Force Node.js 24 now to suppress the Node 20 deprecation warning from
-  # actions/upload-artifact@v6 and actions/download-artifact@v6 (still
-  # compiled for Node 20 as of 2026-08). Remove once v7+ with native Node 24 support is released.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
 
@@ -247,7 +243,7 @@ jobs:
           lintian --fail-on error ./*.dsc
 
       - name: Upload prepared + validated source tree
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: prepared-source
           path: build-area
@@ -264,7 +260,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Download prepared source
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: prepared-source
           path: build-area
@@ -379,7 +375,7 @@ jobs:
           ls -lh debs/
 
       - name: Upload .deb artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: php-debs
           path: debs/*.deb
@@ -409,7 +405,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download built .deb files
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: php-debs
           path: debs
@@ -425,6 +421,44 @@ jobs:
           Acquire::ForceIPv4 "true";
           APT::Get::Assume-Yes "true";
           EOF
+
+      - name: "Add ppa:ondrej/php (runtime dependency: php-common)"
+        # This job runs in a bare `ubuntu:22.04` container, not the
+        # GitHub-hosted runner image -- unlike the other two jobs, it has
+        # neither `sudo` (irrelevant, we're already root in the container)
+        # nor `software-properties-common` (which provides
+        # add-apt-repository) preinstalled. Without ppa:ondrej/php here,
+        # apt only sees stock Ubuntu's much older `php-common`, which is
+        # numerically lower than the `php-common (>= 2:95~)` our packages
+        # require -- every php8.6-* package then fails to install with
+        # "Depends: php-common (>= 2:95~) but it is not going to be installed".
+        run: |
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            if timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update failed after 3 attempts."; exit 1; }
+          done
+          apt-get install -y --no-install-recommends software-properties-common gnupg
+          for attempt in 1 2 3; do
+            if timeout 60 add-apt-repository -y ppa:ondrej/php; then
+              break
+            fi
+            echo "::warning::add-apt-repository attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::add-apt-repository failed after 3 attempts."; exit 1; }
+          done
+          for attempt in 1 2 3; do
+            if timeout 60 apt-get update; then
+              break
+            fi
+            echo "::warning::apt-get update (post-PPA) attempt ${attempt} failed or hung, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update (post-PPA) failed after 3 attempts."; exit 1; }
+          done
 
       - name: Install and run checks
         run: |
@@ -458,7 +492,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download built .deb files
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: php-debs
           path: debs
