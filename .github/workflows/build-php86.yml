@@ -1,4 +1,4 @@
-name: Build PHP 8.6 APT Repository (Ubuntu 22.04 / jammy)
+name: Build PHP 8.6 Packages (Ubuntu 22.04 / jammy)
 
 # ============================================================================
 # DAY-TO-DAY BUILD. Run this every time a new beta/RC drops.
@@ -68,13 +68,12 @@ on:
         type: string
         default: "1"
       publish:
-        description: "Publish to your APT repo on GitHub Pages if build + smoke-test pass"
+        description: "Create a GitHub Release with .deb packages if build + smoke-test pass"
         type: boolean
         default: true
 
 permissions:
-  contents: write   # needed to push the persistent apt-repo-state branch
-  pages: write
+  contents: write   # needed to create GitHub Releases
 
 # Re-dispatching for the same tag/series cancels any run already stuck on
 # it, instead of leaving a hung run to burn hours in parallel with the fix.
@@ -533,9 +532,12 @@ jobs:
 
   # ==========================================================================
   # JOB 5 -- only runs if smoke-test passed.
+  # Creates a GitHub Release with all .deb packages attached as assets.
+  # No branches are created or modified -- everything stays in the branch
+  # that triggered the workflow.
   # ==========================================================================
   publish:
-    name: Publish signed APT repo to GitHub Pages
+    name: Publish GitHub Release with .deb packages
     needs: smoke-test
     if: ${{ inputs.publish }}
     runs-on: ubuntu-22.04
@@ -547,89 +549,54 @@ jobs:
           name: php-debs
           path: debs
 
-      - name: Configure apt for CI reliability (retries, timeouts, IPv4-only)
+      - name: Create GitHub Release and upload .deb assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
-          Acquire::Retries "3";
-          Acquire::http::Timeout "15";
-          Acquire::https::Timeout "15";
-          Acquire::ForceIPv4 "true";
-          APT::Get::Assume-Yes "true";
-          EOF
-          # Drop preinstalled third-party sources we don't need here --
-          # fewer mirrors to query means fewer chances to stall.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
-                     /etc/apt/sources.list.d/azure-cli.list
-          # Bypass the flaky azure.archive.ubuntu.com mirror -- see comment
-          # in the "Assemble + validate" job's identical step.
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            echo "https://archive.ubuntu.com/ubuntu" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          fi
 
-      - name: Install reprepro + gnupg
-        run: |
-          set -euxo pipefail
-          for attempt in 1 2 3; do
-            if sudo timeout 60 apt-get update; then
-              break
-            fi
-            echo "::warning::apt-get update attempt ${attempt} failed or hung, retrying in 5s..."
-            sleep 5
-            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update failed after 3 attempts."; exit 1; }
-          done
-          sudo apt-get install -y --no-install-recommends reprepro gnupg git
+          VERSION_TAG="php${{ inputs.target_series }}-v${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}"
+          RELEASE_NAME="PHP ${{ inputs.target_series }} ${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}"
 
-      - name: Import APT repo signing key
-        run: |
-          set -euxo pipefail
-          echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
-          KEYID=$(gpg --list-secret-keys --keyid-format=long | awk '/^sec/{print $2}' | cut -d/ -f2 | head -n1)
-          echo "KEYID=$KEYID" >> "$GITHUB_ENV"
+          RELEASE_BODY=$(cat <<BODY_EOF
+          ## PHP ${{ inputs.target_series }} Build
 
-      # The repo lives permanently in its own branch, not the runner's temp
-      # filesystem -- otherwise every run would silently wipe every package
-      # from every previous run, and `apt upgrade` would have nothing to see.
-      - name: Check out (or create) the persistent apt-repo-state branch
-        run: |
-          set -euxo pipefail
-          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if timeout 30 git ls-remote --exit-code --heads "$REMOTE" apt-repo-state >/dev/null; then
-            timeout 60 git clone --single-branch --branch apt-repo-state "$REMOTE" repo
+          | | |
+          |---|---|
+          | **Source tag** | \`${{ inputs.php_tag }}\` |
+          | **Version** | \`${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}\` |
+          | **Distro** | Ubuntu 22.04 (jammy) / amd64 |
+          | **Workflow run** | [#$GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) |
+
+          ### Installation
+
+          Download all .\*.deb files from the Assets below, then:
+
+          \`\`\`bash
+          sudo dpkg -i php*.deb
+          sudo apt-get -f install
+          \`\`\`
+
+          Or download individually and install the packages you need.
+          BODY_EOF
+          )
+
+          # Remove existing release + tag if rebuilding the same version
+          gh release delete "$VERSION_TAG" --yes --cleanup-tag 2>/dev/null || true
+          sleep 2
+
+          # Beta/RC/alpha builds are automatically marked as pre-release
+          if echo "${{ inputs.pkg_upstream_version }}" | grep -qE '(alpha|beta|rc|~)'; then
+            PRERELEASE_FLAG="--prerelease"
           else
-            mkdir repo && cd repo && git init -b apt-repo-state && cd ..
+            PRERELEASE_FLAG=""
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Add packages to the repo and push
-        working-directory: repo
-        run: |
-          set -euxo pipefail
-          mkdir -p conf
-          cat > conf/distributions <<EOF
-          Origin: Custom PHP Builds
-          Label: custom-php
-          Codename: $DISTRO_CODENAME
-          Architectures: amd64 source
-          Components: main
-          Description: Self-built pre-release PHP packages
-          SignWith: ${KEYID}
-          EOF
-          reprepro includedeb "$DISTRO_CODENAME" ../debs/*.deb
-          gpg --export "${KEYID}" > apt-repo-signing-key.gpg
-          cat > index.html <<EOF
-          <html><body>
-          <h1>Custom PHP APT repository</h1>
-          <p>Codename: $DISTRO_CODENAME | Built from ${{ inputs.php_tag }}</p>
-          </body></html>
-          EOF
-          git config user.email "ci@example.com"
-          git config user.name "Custom PHP CI"
-          git add -A
-          git commit -m "Add ${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}" || echo "Nothing new to commit"
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" 2>/dev/null || \
-            git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          timeout 60 git push origin apt-repo-state
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          gh release create "$VERSION_TAG" \
+            --title "$RELEASE_NAME" \
+            --notes "$RELEASE_BODY" \
+            ${PRERELEASE_FLAG} \
+            debs/*.deb
+
+          echo "::notice::Release published: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$VERSION_TAG"
+          echo "::notice::Tag: $VERSION_TAG"
