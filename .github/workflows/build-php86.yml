@@ -252,6 +252,7 @@ jobs:
           name: prepared-source
           path: build-area
           if-no-files-found: error
+          include-hidden-files: true
 
   # ==========================================================================
   # JOB 3 -- only runs if validation passed. Actually compiles.
@@ -383,6 +384,7 @@ jobs:
           name: php-debs
           path: debs/*.deb
           if-no-files-found: error
+          include-hidden-files: true
 
   # ==========================================================================
   # JOB 4 -- only runs if the build succeeded. Proves the packages actually
