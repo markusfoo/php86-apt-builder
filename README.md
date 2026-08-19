@@ -1,4 +1,4 @@
-# custom-php-repo 8.6 Alpha / Beta / RC
+# custom-php-repo 8.6 Beta / RC
 
 A self-hosted APT repository for pre-release PHP builds (beta/RC), built entirely
 on GitHub Actions and published on GitHub Pages — no waiting for upstream
@@ -12,15 +12,18 @@ that `deb.sury.org` publishes — `php8.6-cli`, `php8.6-fpm`, `php8.6-common`,
 because it starts from the **actual Debian php-team packaging** and adapts it
 to the new version, rather than hand-rolling packaging rules from scratch.
 
-## Two workflows, two different frequencies
+On top of the core PHP packages, the repository also publishes **PECL
+extensions** — currently **Imagick** (patched for PHP 8.6 compatibility) and
+**Redis** — built against the custom PHP 8.6 installation and added to the
+same APT repository.
 
-This repo intentionally has **two separate workflow files**, run for
-different reasons:
+## Three workflows, three different purposes
 
 | File | When to run it | What it does |
 |---|---|---|
 | `.github/workflows/bootstrap-packaging.yml` | **Rarely.** Once, when setting the repo up, or later if you deliberately want to re-sync from a newer Debian base. | Clones the last *released* PHP series' real Debian packaging from `salsa.debian.org`, mechanically rewrites `8.5` → `8.6` throughout, and commits the result into **this repo** at `packaging/debian/`. |
 | `.github/workflows/build-php86.yml` | **Every time** a new beta/RC of PHP drops. | Uses `packaging/debian/` exactly as committed in this repo. Never talks to salsa.debian.org, never mentions "8.5". Builds, tests, and (optionally) publishes the `.deb`s. |
+| `.github/workflows/build-pecl.yml` | **After** a successful PHP 8.6 build + publish. | Builds PECL extensions (Imagick, Redis) against the freshly published PHP 8.6 packages, then publishes the resulting `.deb`s to the same APT repo. |
 
 The point of splitting them: once `packaging/debian/` is adopted into this
 repo, it's *yours* — tracked in git, editable directly, evolved release to
@@ -108,6 +111,36 @@ resolve → prepare-and-validate → build → smoke-test → publish
                                                     (auto, no approval gate)
 ```
 
+## `build-pecl.yml` — PECL extensions (Imagick, Redis)
+
+This is a separate workflow because PECL extensions are **not** part of
+Debian's `php-team` packaging — they are built with `phpize` against the
+already-installed custom PHP 8.6 packages.
+
+**Prerequisite:** run this only **after** `build-php86.yml` has completed
+successfully and published `php8.6-dev`, `php8.6-common`, and `php-pear`
+to the APT repo. The PECL builder pulls those packages from the repo.
+
+| Extension | Source | Notes |
+|---|---|---|
+| **Imagick** | `Imagick/imagick` on GitHub | Patched at build time for PHP 8.6 API changes (`zend_is_callable` signature) |
+| **Redis** | `phpredis/phpredis` on GitHub | Built as-is |
+
+The workflow:
+
+1. Adds the custom APT repo and installs `php8.6-dev`, `php8.6-common`,
+   `php-pear`, plus library dev packages (`libmagickwand-dev`, `libssl-dev`).
+2. Builds each extension with `phpize8.6` → `./configure` → `make`.
+3. Packages each `.so` into a minimal `.deb` (`php8.6-imagick`, `php8.6-redis`).
+4. Runs `reprepro includedeb` on the `apt-repo-state` branch to publish.
+
+Resulting packages available via `apt`:
+
+```
+php8.6-imagick   — ImageMagick extension for PHP 8.6 (patched)
+php8.6-redis     — Redis extension for PHP 8.6
+```
+
 ### Why a persistent git branch instead of just deploying to Pages directly
 
 `actions/deploy-pages` replaces the entire site on every run. If the reprepro
@@ -134,9 +167,6 @@ git add -A && git commit -m "prune old builds" && git push
 
 ## What this does NOT do
 
-- **No PECL extensions.** `imagick`, `redis`, `igbinary`, etc. are not part
-  of Debian's `php-team` packaging and are not built here. They'd need a
-  separate `phpize`/`pecl` build job.
 - **No `testing`/`main` split and no manual approval gate.** Every
   successful, smoke-tested run with `publish: true` goes straight to the
   component your servers track. If you want a staging step before
@@ -180,11 +210,12 @@ Whatever exits non-zero here fails the whole run and blocks publishing.
 ### 1. Create the repository
 
 Create a new, empty GitHub repository (see the step-by-step guide below for
-exact field values), then add both workflow files at:
+exact field values), then add the workflow files at:
 
 ```
 .github/workflows/bootstrap-packaging.yml
 .github/workflows/build-php86.yml
+.github/workflows/build-pecl.yml
 ```
 
 (copy them in verbatim — do not merge them into one file, they're meant to
@@ -241,7 +272,7 @@ Actions-based `deploy-pages` flow — it's what lets the workflow update the
 site with a plain `git push` instead of replacing the whole site on every
 run.
 
-### 6. Run the build
+### 6. Run the PHP build
 
 **Actions → Build PHP 8.6 APT Repository (Ubuntu 22.04 / jammy) → Run
 workflow**, with inputs:
@@ -257,6 +288,14 @@ workflow**, with inputs:
 Bump `php_tag` / `pkg_upstream_version` each time PHP cuts a new beta/RC
 (`php-8.6.0beta2`, `php-8.6.0rc1`, ...) and re-run.
 
+### 7. Run the PECL build (after PHP is published)
+
+**Actions → Build PECL (Imagick, Redis) for PHP 8.6 → Run workflow**.
+
+This workflow has no inputs — it always builds against whatever `php8.6-*`
+packages are currently in the APT repo. Run it after each successful PHP
+build + publish.
+
 ## Using the repository on your servers
 
 ```bash
@@ -268,6 +307,7 @@ echo "deb [signed-by=/usr/share/keyrings/custom-php.gpg] https://<you>.github.io
 
 sudo apt update
 sudo apt install php8.6-cli php8.6-fpm php8.6-common php8.6-mysql php8.6-gd
+sudo apt install php8.6-imagick php8.6-redis   # PECL extensions
 ```
 
 Because it's a real APT repo, `apt upgrade` picks up new builds automatically

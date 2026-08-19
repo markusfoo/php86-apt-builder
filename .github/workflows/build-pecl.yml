@@ -6,9 +6,11 @@ on:
 jobs:
   build-pecl:
     runs-on: ubuntu-22.04
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install custom PHP 8.6 and build dependencies
         run: |
