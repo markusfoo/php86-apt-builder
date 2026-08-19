@@ -86,10 +86,10 @@ env:
   DISTRO_CODENAME: jammy   # hardcoded: the only target your Hestia server needs
   PKG: php${{ inputs.target_series }}
   DEBIAN_FRONTEND: noninteractive   # never let a dpkg/debconf prompt block a headless runner
-  # Suppress Node.js 20 deprecation warning from actions/upload-artifact@v6
-  # and actions/download-artifact@v6 (still compiled for Node 20 as of
-  # 2026-08). Remove once v7+ with Node 24 support is released.
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+  # Force Node.js 24 now to suppress the Node 20 deprecation warning from
+  # actions/upload-artifact@v6 and actions/download-artifact@v6 (still
+  # compiled for Node 20 as of 2026-08). Remove once v7+ with native Node 24 support is released.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
 
@@ -284,6 +284,8 @@ jobs:
             -name 'ltmain.sh' -o \
             -name '*.sh' -o \
             -name 'run-tests.php' -o \
+            -name 'shtool' -o \
+            -name 'config-stubs' -o \
             -name 'debian/rules' \
           \) -exec chmod +x {} +
           echo "Restored +x on critical build scripts:"

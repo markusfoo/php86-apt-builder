@@ -192,7 +192,7 @@ COMMON_CONFIG := \
 		--disable-rpath \
 		--disable-static \
 		--disable-dtrace \
-		--with-pic \
+		--enable-pic \
 		--with-layout=GNU \
 		--without-pear \
 		--enable-filter \
