@@ -614,7 +614,7 @@ jobs:
           sudo dpkg -i ./debs/*.deb || sudo apt-get -f install -y
           # PECL extension build dependencies
           sudo apt-get install -y --no-install-recommends \
-            checkinstall pear \
+            checkinstall php-pear \
             libmagickwand-dev libmagickcore-dev \
             libmemcached-dev zlib1g-dev \
             libmongoc-dev libbson-dev \
