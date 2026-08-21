@@ -660,6 +660,16 @@ jobs:
             }
             cd "$BDIR"
 
+            # --- apply PHP 8.6 compatibility patches ---
+            case "$EXT" in
+              imagick)
+                if [ -f imagick_class.c ]; then
+                  sed -i 's/zend_is_callable(user_callback, 0, NULL TSRMLS_CC)/zend_is_callable_ex(user_callback, NULL, 0, NULL, NULL, NULL)/g' imagick_class.c
+                  echo "  Applied zend_is_callable_ex patch for PHP 8.6"
+                fi
+                ;;
+            esac
+
             # --- phpize ---
             PHPIZE="phpize${SERIES}"
             PCONF="/usr/bin/php-config${SERIES}"
