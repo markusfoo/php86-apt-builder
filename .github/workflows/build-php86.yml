@@ -46,7 +46,22 @@ name: Build PHP 8.6 Packages (Ubuntu 22.04 / jammy)
 #   6. A `concurrency` group cancels a stale/stuck run automatically the
 #      moment you re-dispatch for the same tag, instead of requiring you to
 #      cancel it by hand first.
-# ============================================================================
+#
+# PECL EXTENSIONS (Job 5 - build-pecl):
+#   After the PHP packages are compiled, the pipeline automatically builds
+#   a set of common PECL extensions (xdebug, redis, igbinary, msgpack, apcu,
+#   mongodb, imagick, memcached) against the just-built PHP.  Extensions
+#   that fail to compile (e.g. not yet compatible with this PHP version) are
+#   skipped with a warning -- the workflow still succeeds.
+#   To change the list, edit the EXTENSIONS variable in the build-pecl job.
+#
+# SMART RELEASE MANAGEMENT (Job 6 - publish):
+#   If a GitHub Release for this version tag already exists, new .deb files
+#   are UPLOADED to it (existing assets are never deleted).  The release
+#   description is automatically updated with a dated entry listing any
+#   newly added PECL extensions.  If no release exists, a new one is created
+#   with full metadata and a PECL extensions table.
+# =============================================================================
 
 on:
   workflow_dispatch:
@@ -531,38 +546,334 @@ jobs:
           if [ -x tests/smoke.sh ]; then ./tests/smoke.sh; fi
 
   # ==========================================================================
-  # JOB 5 -- only runs if smoke-test passed.
-  # Creates a GitHub Release with all .deb packages attached as assets.
-  # No branches are created or modified -- everything stays in the branch
-  # that triggered the workflow.
+  # JOB 5 -- builds PECL extensions against the just-compiled PHP 8.6.
+  # Runs in parallel with smoke-test (both depend only on the build job).
+  # Extensions that fail to compile (e.g. not yet compatible with 8.6)
+  # are skipped with a warning -- the workflow still succeeds.
+  #
+  # To add/remove extensions, edit the EXTENSIONS list below.
+  # ==========================================================================
+  build-pecl:
+    name: Build PECL extension packages
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Download built PHP .deb files
+        uses: actions/download-artifact@v7
+        with:
+          name: php-debs
+          path: debs
+
+      - name: Configure apt for CI reliability
+        run: |
+          set -euxo pipefail
+          sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "15";
+          Acquire::https::Timeout "15";
+          Acquire::ForceIPv4 "true";
+          APT::Get::Assume-Yes "true";
+          EOF
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/azure-cli.list
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            echo "https://archive.ubuntu.com/ubuntu" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
+
+      - name: Add repositories and install PHP + PECL build dependencies
+        run: |
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            if sudo timeout 60 apt-get update; then break; fi
+            echo "::warning::apt-get update attempt ${attempt} failed, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update failed"; exit 1; }
+          done
+          sudo apt-get install -y --no-install-recommends software-properties-common gnupg
+          for attempt in 1 2 3; do
+            if sudo timeout 60 add-apt-repository -y ppa:ondrej/php; then break; fi
+            echo "::warning::add-apt-repository attempt ${attempt} failed, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::add-apt-repository failed"; exit 1; }
+          done
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          for attempt in 1 2 3; do
+            if sudo timeout 60 /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y; then break; fi
+            echo "::warning::PGDG setup attempt ${attempt} failed, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::PGDG setup failed"; exit 1; }
+          done
+          for attempt in 1 2 3; do
+            if sudo timeout 60 apt-get update; then break; fi
+            echo "::warning::apt-get update (post-repo) attempt ${attempt} failed, retrying in 5s..."
+            sleep 5
+            [ "$attempt" -eq 3 ] && { echo "::error::apt-get update failed"; exit 1; }
+          done
+          # Install the PHP packages we just built (provides phpize, headers, php-config)
+          sudo dpkg -i ./debs/*.deb || sudo apt-get -f install -y
+          # PECL extension build dependencies
+          sudo apt-get install -y --no-install-recommends \
+            checkinstall pear \
+            libmagickwand-dev libmagickcore-dev \
+            libmemcached-dev zlib1g-dev \
+            libmongoc-dev libbson-dev \
+            libssl-dev libcurl4-openssl-dev
+
+      - name: Build PECL extensions
+        run: |
+          set -uo pipefail
+
+          # ------------------------------------------------------------------
+          # PECL extensions to build.  Add or remove names here; the rest of
+          # the script handles download, compile, and .deb packaging.
+          # ------------------------------------------------------------------
+          EXTENSIONS="xdebug redis igbinary msgpack apcu mongodb imagick memcached"
+
+          SERIES="${{ inputs.target_series }}"
+          OUT_DIR="pecl-builds"
+          mkdir -p "$OUT_DIR"
+
+          for EXT in $EXTENSIONS; do
+            echo "::group::$EXT"
+            WORK=$(mktemp -d)
+            cd "$WORK"
+
+            # --- download ---
+            if ! pecl download "$EXT" 2>/dev/null; then
+              echo "::warning::pecl download failed for $EXT (may not exist or network issue)"
+              rm -rf "$WORK"; echo "::endgroup::"; continue
+            fi
+
+            ARCHIVE=$(ls -t "${EXT}"-*.tgz 2>/dev/null | head -1)
+            [ -z "$ARCHIVE" ] && { rm -rf "$WORK"; echo "::endgroup::"; continue }
+
+            # --- version from filename: redis-6.1.0.tgz -> 6.1.0 ---
+            EXT_VER=$(echo "$ARCHIVE" | sed -n "s/^${EXT}-\(.*\)\\.tgz$/\\1/p")
+            [ -z "$EXT_VER" ] && EXT_VER="0.0.0"
+
+            tar xzf "$ARCHIVE"
+            BDIR=$(ls -d "${EXT}"-* 2>/dev/null | head -1)
+            [ -z "$BDIR" ] || [ ! -d "$BDIR" ] && {
+              echo "::warning::No build directory for $EXT"
+              rm -rf "$WORK"; echo "::endgroup::"; continue
+            }
+            cd "$BDIR"
+
+            # --- phpize ---
+            PHPIZE="phpize${SERIES}"
+            PCONF="/usr/bin/php-config${SERIES}"
+            [ ! -x "$PCONF" ] && PCONF="/usr/bin/php-config"
+
+            if ! "$PHPIZE" >/dev/null 2>&1; then
+              echo "::warning::phpize failed for $EXT"
+              cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
+            fi
+
+            # --- configure ---
+            CONF_EXTRA=""
+            case "$EXT" in
+              imagick)   CONF_EXTRA="--with-imagick" ;;
+              memcached) CONF_EXTRA="--disable-memcached-sasl" ;;
+            esac
+
+            if ! ./configure --with-php-config="$PCONF" $CONF_EXTRA >/dev/null 2>&1; then
+              echo "::warning::configure failed for $EXT"
+              cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
+            fi
+
+            # --- compile ---
+            if ! make -j"$(nproc)" >/dev/null 2>&1; then
+              echo "::warning::make failed for $EXT (not yet compatible with PHP ${SERIES}?)"
+              cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
+            fi
+
+            # --- package as .deb via checkinstall ---
+            if sudo checkinstall -D \
+              --pkgname="php${SERIES}-${EXT}" \
+              --pkgversion="$EXT_VER" \
+              --pkgrelease="1" \
+              --maintainer="markusfoo" \
+              --pkgsource="PECL" \
+              --pkggroup="php" \
+              --nodoc \
+              --fstrans=no \
+              --backup=no \
+              -y make install >/dev/null 2>&1; then
+
+              CREATED=$(ls -t *.deb 2>/dev/null | head -1 || true)
+              if [ -n "$CREATED" ] && [ -f "$CREATED" ]; then
+                mv "$CREATED" "${OUT_DIR}/"
+                echo "  Built: $(basename "$CREATED")"
+              else
+                echo "::warning::checkinstall succeeded but no .deb found for $EXT"
+              fi
+            else
+              echo "::warning::checkinstall failed for $EXT"
+            fi
+
+            cd /
+            rm -rf "$WORK"
+            echo "::endgroup::"
+          done
+
+          echo ""
+          echo "=== PECL Build Summary ==="
+          if ls "$OUT_DIR"/*.deb 1>/dev/null 2>&1; then
+            echo "Successfully built $(ls "$OUT_DIR"/*.deb | wc -l) PECL extension package(s):"
+            ls -lh "$OUT_DIR"/
+          else
+            echo "No PECL extensions were successfully built."
+          fi
+
+      - name: Upload PECL .deb artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: pecl-debs
+          path: pecl-builds/*.deb
+          if-no-files-found: warn
+          include-hidden-files: true
+
+  # ==========================================================================
+  # JOB 6 -- publishes .deb packages to a GitHub Release.
+  #
+  # SMART RELEASE MANAGEMENT:
+  #   - If a release for this VERSION_TAG already exists, new .deb files
+  #     are UPLOADED to it (existing assets are kept). The release body
+  #     is updated with a dated entry listing any newly added PECL
+  #     extensions.
+  #   - If no release exists yet, a new one is created with full metadata
+  #     and a PECL extensions table.
+  #   - Beta/RC/alpha versions are automatically marked as pre-release.
   # ==========================================================================
   publish:
-    name: Publish GitHub Release with .deb packages
-    needs: smoke-test
+    name: Publish to GitHub Release
+    needs: [smoke-test, build-pecl]
     if: ${{ inputs.publish }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
-      - name: Download built .deb files
+      - name: Download PHP .deb files
         uses: actions/download-artifact@v7
         with:
           name: php-debs
-          path: debs
+          path: php-debs
 
-      - name: Create GitHub Release and upload .deb assets
+      - name: Download PECL .deb files (if any)
+        uses: actions/download-artifact@v7
+        with:
+          name: pecl-debs
+          path: pecl-debs
+        continue-on-error: true
+
+      - name: Upsert GitHub Release with .deb packages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
 
-          # Sanitize version for git tag: ~ is not allowed in tag names
           SAFE_VERSION=$(echo "${{ inputs.pkg_upstream_version }}" | tr '~' '-')
           VERSION_TAG="php${{ inputs.target_series }}-v${SAFE_VERSION}-${{ inputs.pkg_revision }}"
           RELEASE_NAME="PHP ${{ inputs.target_series }} ${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}"
+          SERIES="${{ inputs.target_series }}"
 
-          RELEASE_BODY=$(cat <<BODY_EOF
+          # -----------------------------------------------------------------
+          # Pre-release flag
+          # -----------------------------------------------------------------
+          if echo "${{ inputs.pkg_upstream_version }}" | grep -qE '(alpha|beta|rc|~)'; then
+            PRERELEASE_FLAG="--prerelease"
+          else
+            PRERELEASE_FLAG=""
+          fi
+
+          # -----------------------------------------------------------------
+          # Build PECL extensions table (for new-release body)
+          # -----------------------------------------------------------------
+          PECL_TABLE=""
+          if [ -d "pecl-debs" ] && ls pecl-debs/*.deb 1>/dev/null 2>&1; then
+            PECL_TABLE=$(printf '| Extension | Version |\n|---|---|\n')
+            for deb in pecl-debs/*.deb; do
+              BN=$(basename "$deb" .deb)
+              EN=$(echo "$BN" | sed "s/^php${SERIES}-//;s/_.*//")
+              EV=$(echo "$BN" | sed "s/^php${SERIES}-[^_]*_//;s/_amd64//")
+              PECL_TABLE="${PECL_TABLE}| ${EN} | \`${EV}\` |\n"
+            done
+          fi
+
+          # -----------------------------------------------------------------
+          # Check if a release for this tag already exists
+          # -----------------------------------------------------------------
+          RELEASE_EXISTS=false
+          EXISTING_ASSETS=""
+          if gh release view "$VERSION_TAG" >/dev/null 2>&1; then
+            RELEASE_EXISTS=true
+            EXISTING_ASSETS=$(gh release view "$VERSION_TAG" --json assets -q '.assets[].name' 2>/dev/null | sort)
+          fi
+
+          # -----------------------------------------------------------------
+          # Collect only the NEW .deb files (not yet in the release)
+          # -----------------------------------------------------------------
+          NEW_DEBS=()
+          NEW_PECL=""
+
+          # PECL extensions first
+          for deb in pecl-debs/*.deb; do
+            [ -f "$deb" ] || continue
+            DN=$(basename "$deb")
+            if echo "$EXISTING_ASSETS" | grep -qF "$DN"; then
+              echo "  skip (already uploaded): $DN"
+            else
+              NEW_DEBS+=("$deb")
+              BN=$(basename "$DN" .deb)
+              EN=$(echo "$BN" | sed "s/^php${SERIES}-//;s/_.*//")
+              EV=$(echo "$BN" | sed "s/^php${SERIES}-[^_]*_//;s/_amd64//")
+              NEW_PECL="${NEW_PECL}| ${EN} | \`${EV}\` |\n"
+              echo "  new PECL: $DN"
+            fi
+          done
+
+          # PHP core packages
+          for deb in php-debs/*.deb; do
+            [ -f "$deb" ] || continue
+            DN=$(basename "$deb")
+            if echo "$EXISTING_ASSETS" | grep -qF "$DN"; then
+              echo "  skip (already uploaded): $DN"
+            else
+              NEW_DEBS+=("$deb")
+              echo "  new PHP: $DN"
+            fi
+          done
+
+          if [ "${#NEW_DEBS[@]}" -eq 0 ]; then
+            echo "::notice::All packages already present in release $VERSION_TAG -- nothing to upload."
+            exit 0
+          fi
+
+          echo "Uploading ${#NEW_DEBS[@]} new package(s) to release $VERSION_TAG"
+
+          # -----------------------------------------------------------------
+          # Create or update the release
+          # -----------------------------------------------------------------
+          TODAY=$(date -u +%Y-%m-%d)
+
+          if [ "$RELEASE_EXISTS" = true ]; then
+            # --- UPDATE existing release ---
+            gh release upload "$VERSION_TAG" "${NEW_DEBS[@]}"
+
+            if [ -n "$NEW_PECL" ]; then
+              gh release view "$VERSION_TAG" --json body -q '.body' > /tmp/current-body.md
+              printf -- '\n---\n\n### Added %s (run #%s)\n\n| Extension | Version |\n|---|---|\n%s' \
+                "$TODAY" "$GITHUB_RUN_NUMBER" "$NEW_PECL" >> /tmp/current-body.md
+              gh release edit "$VERSION_TAG" --notes-file /tmp/current-body.md
+              echo "::notice::Updated release $VERSION_TAG with new PECL extensions"
+            else
+              echo "::notice::Uploaded packages to existing release $VERSION_TAG"
+            fi
+          else
+            # --- CREATE new release ---
+            cat > /tmp/release-notes.md <<NOTES_EOF
           ## PHP ${{ inputs.target_series }} Build
 
           | | |
@@ -571,6 +882,13 @@ jobs:
           | **Version** | \`${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}\` |
           | **Distro** | Ubuntu 22.04 (jammy) / amd64 |
           | **Workflow run** | [#$GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) |
+          NOTES_EOF
+
+            if [ -n "$PECL_TABLE" ]; then
+              printf -- '\n### PECL Extensions\n\n%s' "$PECL_TABLE" >> /tmp/release-notes.md
+            fi
+
+            cat >> /tmp/release-notes.md <<'INSTALL_EOF'
 
           ### Installation
 
@@ -582,25 +900,13 @@ jobs:
           \`\`\`
 
           Or download individually and install the packages you need.
-          BODY_EOF
-          )
+          INSTALL_EOF
 
-          # Remove existing release + tag if rebuilding the same version
-          gh release delete "$VERSION_TAG" --yes --cleanup-tag 2>/dev/null || true
-          sleep 2
-
-          # Beta/RC/alpha builds are automatically marked as pre-release
-          if echo "${{ inputs.pkg_upstream_version }}" | grep -qE '(alpha|beta|rc|~)'; then
-            PRERELEASE_FLAG="--prerelease"
-          else
-            PRERELEASE_FLAG=""
+            gh release create "$VERSION_TAG" \
+              --title "$RELEASE_NAME" \
+              --notes-file /tmp/release-notes.md \
+              ${PRERELEASE_FLAG} \
+              "${NEW_DEBS[@]}"
           fi
 
-          gh release create "$VERSION_TAG" \
-            --title "$RELEASE_NAME" \
-            --notes "$RELEASE_BODY" \
-            ${PRERELEASE_FLAG} \
-            debs/*.deb
-
-          echo "::notice::Release published: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$VERSION_TAG"
-          echo "::notice::Tag: $VERSION_TAG"
+          echo "::notice::Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$VERSION_TAG"
