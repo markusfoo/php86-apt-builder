@@ -631,7 +631,7 @@ jobs:
           EXTENSIONS="xdebug redis igbinary msgpack apcu mongodb imagick memcached"
 
           SERIES="${{ inputs.target_series }}"
-          OUT_DIR="pecl-builds"
+          OUT_DIR="$PWD/pecl-builds"
           mkdir -p "$OUT_DIR"
 
           for EXT in $EXTENSIONS; do
