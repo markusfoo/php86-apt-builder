@@ -661,8 +661,8 @@ jobs:
 
             # --- clone from official GitHub repo ---
             echo "Cloning $REPO_URL ..."
-            CLONE_OPTS="--depth 1"
-            [ "$EXT" = "mongodb" ] && CLONE_OPTS="--depth 1 --recurse-submodules --shallow-submodules"
+            CLONE_OPTS="--depth 1 --tags"
+            [ "$EXT" = "mongodb" ] && CLONE_OPTS="--depth 1 --tags --recurse-submodules --shallow-submodules"
             if ! timeout 120 git clone $CLONE_OPTS "$REPO_URL" src 2>&1; then
               echo "::warning::git clone failed for $EXT"
               FAIL=$((FAIL+1))
@@ -672,6 +672,11 @@ jobs:
 
             # --- version from git tag ---
             EXT_VER=$(git describe --tags 2>/dev/null | sed 's/^v//' || git rev-parse --short HEAD)
+            # Debian version MUST start with a digit; prefix commit hashes with 0.0.0+
+            case "$EXT_VER" in
+              [0-9]*) ;;
+              *) EXT_VER="0.0.0+${EXT_VER}" ;;
+            esac
             echo "Version: $EXT_VER"
 
             # --- apply PHP 8.6 compatibility patches ---

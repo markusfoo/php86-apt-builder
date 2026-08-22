@@ -137,8 +137,8 @@ jobs:
             esac
 
             echo "Cloning $REPO_URL ..."
-            CLONE_OPTS="--depth 1"
-            [ "$EXT" = "mongodb" ] && CLONE_OPTS="--depth 1 --recurse-submodules --shallow-submodules"
+            CLONE_OPTS="--depth 1 --tags"
+            [ "$EXT" = "mongodb" ] && CLONE_OPTS="--depth 1 --tags --recurse-submodules --shallow-submodules"
             if ! timeout 120 git clone $CLONE_OPTS "$REPO_URL" src 2>&1; then
               echo "::warning::git clone failed for $EXT"
               SKIP=$((SKIP+1))
