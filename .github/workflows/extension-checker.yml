@@ -17,9 +17,9 @@ on:
   workflow_dispatch:
     inputs:
       php_tag:
-        description: 'Release tag to download PHP debs from (e.g. php8.6-v8.6.0~beta1-1)'
+        description: 'Release tag to download PHP debs from'
         type: string
-        default: 'php8.6-v8.6.0~beta1-1'
+        default: 'php8.6-v8.6.0-beta1-1'
       extensions:
         description: 'Space-separated list of PECL extensions to test'
         type: string
