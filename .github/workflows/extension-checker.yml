@@ -162,12 +162,12 @@ jobs:
               msgpack)
                 # PHP 8.6: PG(unserialize_callback_func) changed from char* to zend_string*
                 if [ -f msgpack_unpack.c ]; then
-                  sed -i 's/PG(unserialize_callback_func)\[0\] == .\0./ZSTR_LEN(PG(unserialize_callback_func)) == 0/g' msgpack_unpack.c
+                  sed -i 's/PG(unserialize_callback_func)\[0\] == .\\0./ZSTR_LEN(PG(unserialize_callback_func)) == 0/g' msgpack_unpack.c
                   echo "  [PATCH] Applied PG(unserialize_callback_func) zend_string patch"
                 fi
                 if [ -f msgpack_class.c ]; then
                   # Same pattern may exist in class file
-                  sed -i 's/PG(unserialize_callback_func)\[0\] == .\0./ZSTR_LEN(PG(unserialize_callback_func)) == 0/g' msgpack_class.c
+                  sed -i 's/PG(unserialize_callback_func)\[0\] == .\\0./ZSTR_LEN(PG(unserialize_callback_func)) == 0/g' msgpack_class.c
                 fi
                 ;;
             esac
