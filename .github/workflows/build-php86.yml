@@ -646,7 +646,7 @@ jobs:
             fi
 
             ARCHIVE=$(ls -t "${EXT}"-*.tgz 2>/dev/null | head -1)
-            [ -z "$ARCHIVE" ] && { rm -rf "$WORK"; echo "::endgroup::"; continue }
+            [ -z "$ARCHIVE" ] && { rm -rf "$WORK"; echo "::endgroup::"; continue; }
 
             # --- version from filename: redis-6.1.0.tgz -> 6.1.0 ---
             EXT_VER=$(echo "$ARCHIVE" | sed -n "s/^${EXT}-\(.*\)\\.tgz$/\\1/p")
@@ -656,7 +656,7 @@ jobs:
             BDIR=$(ls -d "${EXT}"-* 2>/dev/null | head -1)
             [ -z "$BDIR" ] || [ ! -d "$BDIR" ] && {
               echo "::warning::No build directory for $EXT"
-              rm -rf "$WORK"; echo "::endgroup::"; continue
+              rm -rf "$WORK"; echo "::endgroup::"; continue;
             }
             cd "$BDIR"
 
