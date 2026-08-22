@@ -84,9 +84,10 @@ jobs:
             sleep 5
           done
 
-          # Install PECL build tools
+          # Install PECL build tools + extension-specific system libs
           sudo apt-get install -y --no-install-recommends \
-            checkinstall php-pear php8.5-dev build-essential
+            checkinstall php-pear php8.5-dev build-essential \
+            libmagickwand-dev libmemcached-dev zlib1g-dev libssl-dev libsasl2-dev
 
           # Install our PHP 8.6 debs
           sudo dpkg -i php-debs/*.deb 2>/dev/null || true
@@ -136,7 +137,9 @@ jobs:
             esac
 
             echo "Cloning $REPO_URL ..."
-            if ! timeout 60 git clone --depth 1 "$REPO_URL" src 2>&1; then
+            CLONE_OPTS="--depth 1"
+            [ "$EXT" = "mongodb" ] && CLONE_OPTS="--depth 1 --recurse-submodules --shallow-submodules"
+            if ! timeout 120 git clone $CLONE_OPTS "$REPO_URL" src 2>&1; then
               echo "::warning::git clone failed for $EXT"
               SKIP=$((SKIP+1))
               echo "SKIP" > "$RESULTS_DIR/$EXT.result"
@@ -154,6 +157,17 @@ jobs:
                 if [ -f imagick_class.c ]; then
                   sed -i 's/zend_is_callable(user_callback, 0, NULL TSRMLS_CC)/zend_is_callable_ex(user_callback, NULL, 0, NULL, NULL, NULL)/g' imagick_class.c
                   echo "  [PATCH] Applied zend_is_callable_ex patch"
+                fi
+                ;;
+              msgpack)
+                # PHP 8.6: PG(unserialize_callback_func) changed from char* to zend_string*
+                if [ -f msgpack_unpack.c ]; then
+                  sed -i 's/PG(unserialize_callback_func)\[0\] == .\0./ZSTR_LEN(PG(unserialize_callback_func)) == 0/g' msgpack_unpack.c
+                  echo "  [PATCH] Applied PG(unserialize_callback_func) zend_string patch"
+                fi
+                if [ -f msgpack_class.c ]; then
+                  # Same pattern may exist in class file
+                  sed -i 's/PG(unserialize_callback_func)\[0\] == .\0./ZSTR_LEN(PG(unserialize_callback_func)) == 0/g' msgpack_class.c
                 fi
                 ;;
             esac
@@ -174,7 +188,7 @@ jobs:
             CONF_EXTRA=""
             case "$EXT" in
               imagick)   CONF_EXTRA="--with-imagick" ;;
-              memcached) CONF_EXTRA="--disable-memcached-sasl" ;;
+              memcached) CONF_EXTRA="--with-libmemcached-dir=/usr --disable-memcached-sasl" ;;
             esac
 
             echo "--- configure $CONF_EXTRA ---"
