@@ -1,19 +1,19 @@
-# PHP 8.6 Debian Packages (Ubuntu 22.04 / jammy / amd64)
+# PHP APT Builder
 
-Pre-built `.deb` packages for PHP 8.6 beta/RC releases, published as
+Pre-built `.deb` packages for PHP pre-release versions (beta/RC), published as
 **GitHub Releases** with all assets attached. No APT repository setup
 required -- just download the `.deb` files and install.
 
-Built from the **real Debian php-team packaging**, adapted for PHP 8.6.
-Produces the same split of packages that `deb.sury.org` publishes
-(`php8.6-cli`, `php8.6-fpm`, `php8.6-common`, `php8.6-gd`, `php8.6-mysql`,
-`php8.6-curl`, `php8.6-mbstring`, `php8.6-xml`, `php8.6-zip`, `php8.6-bcmath`,
-`php8.6-intl`, `php8.6-ldap`, `php8.6-readline`, `php8.6-soap`,
-`php8.6-sqlite3`, `php8.6-bz2`, `php8.6-xsl`, `php8.6-dev`, etc.).
+Built from the **real Debian php-team packaging**, adapted for the target
+PHP series. Produces the same split of packages that `deb.sury.org` publishes
+(`phpX.Y-cli`, `phpX.Y-fpm`, `phpX.Y-common`, `phpX.Y-gd`, `phpX.Y-mysql`,
+`phpX.Y-curl`, `phpX.Y-mbstring`, `phpX.Y-xml`, `phpX.Y-zip`, etc.).
 
 **PECL extensions** are built automatically as part of every release:
-xdebug, redis, igbinary, msgpack, apcu, mongodb, imagick (patched for PHP 8.6),
-memcached. Extensions that fail to compile are skipped with a warning.
+xdebug, redis, igbinary, msgpack, apcu, mongodb, imagick, memcached.
+Extensions that fail to compile are skipped with a warning.
+
+Target: **Ubuntu 22.04 (jammy) / amd64**.
 
 ## Quick start
 
@@ -39,23 +39,17 @@ resolve -> prepare-and-validate -> build -> smoke-test --+-> publish
 |---|---|
 | **resolve** | Confirms the php-src tag exists and packaging matches the target series |
 | **prepare-and-validate** | Fetches source, validates packaging without compiling |
-| **build** | Compiles all PHP 8.6 `.deb` packages |
+| **build** | Compiles all PHP `.deb` packages |
 | **smoke-test** | Installs in a clean container and runs `php -v`, `php -m`, `php-fpm -t` |
-| **build-pecl** | Builds PECL extensions against the compiled PHP (runs in parallel with smoke-test) |
-| **publish** | Uploads new `.deb` files to the GitHub Release (smart upsert -- never deletes existing assets) |
+| **build-pecl** | Builds PECL extensions against the compiled PHP (parallel with smoke-test) |
+| **publish** | Uploads new `.deb` files to the GitHub Release (smart upsert) |
 
 ### PECL extensions
 
-These are built automatically in the `build-pecl` job. To add or remove
-extensions, edit the `EXTENSIONS` variable in the workflow:
+Built automatically in the `build-pecl` job. To add or remove extensions,
+edit the `EXTENSIONS` variable in `build-php.yml`.
 
-```yaml
-EXTENSIONS="xdebug redis igbinary msgpack apcu mongodb imagick memcached"
-```
-
-Imagick includes a build-time patch for PHP 8.6 API compatibility
-(`zend_is_callable` -> `zend_is_callable_ex`). If other extensions need
-patches for PHP 8.6, add them in the same `case` block.
+Imagick and msgpack include build-time patches for PHP 8.6 API compatibility.
 
 ### Smart release management
 
@@ -63,15 +57,9 @@ The `publish` job does **not** delete and recreate releases. Instead:
 
 - If a release for this version tag already exists, only **new** `.deb`
   files are uploaded (existing assets are kept).
-- If new PECL extensions are added, the release description is updated
-  with a dated entry listing the extension name and version.
 - Beta/RC/alpha versions are automatically marked as pre-release.
 
-This means you can re-run the workflow and it will only add what's missing.
-
-## `build-php86.yml` -- the day-to-day build
-
-Inputs:
+## `build-php.yml` -- the day-to-day build
 
 | Input | Default | Meaning |
 |---|---|---|
@@ -81,44 +69,37 @@ Inputs:
 | `pkg_revision` | `1` | Debian package revision suffix |
 | `publish` | `true` | Create/update a GitHub Release if build + smoke-test pass |
 
-The distro is hardcoded (`jammy` / Ubuntu 22.04 / amd64).
-
 ## `bootstrap-packaging.yml` -- run once
 
-This workflow is run **once** to set up `packaging/debian/` in this repo.
-It clones the Debian php-team packaging for the last released PHP series
-(e.g. 8.5), mechanically rewrites it for 8.6, and pushes to a branch
-for review. After merging, `build-php86.yml` uses it for every build.
+Run **once** to set up `packaging/debian/`. It clones the Debian php-team
+packaging for the last released PHP series, rewrites it for the target series,
+and pushes to a branch for review.
 
-See the workflow file header for full details.
+## `extension-checker.yml` -- fast compile test
 
-## Testing your own products before publishing
+Downloads pre-built PHP `.deb` packages from a release, installs them, and
+tests compilation of each PECL extension. Completes in ~2 minutes. Use this
+to iterate on patches before running the full build.
 
-Add a `tests/smoke.sh` to this repository. It runs automatically in the
-`smoke-test` job, after packages are installed and before anything is
-published:
+---
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-php8.6 -r "require 'vendor/autoload.php';"
-composer --working-dir=/path/to/your/app check-platform-reqs
-```
+## Changelog
 
-Anything that exits non-zero blocks publishing.
+### 8.6.0 Beta 1
 
-## What this does NOT do
-
-- **No APT repository.** Packages are published as GitHub Release assets.
-  Download and install with `dpkg -i`.
-- **No isolated build chroot.** `dpkg-buildpackage` runs directly on the
-  GitHub-hosted runner (still a fresh, disposable VM per run).
-- **No guarantee of a clean first build.** The mechanical packaging
-  rewrite from `bootstrap-packaging.yml` is best-effort.
-- **Single architecture/distro.** `amd64` / jammy only, hardcoded.
-
-## Safety note
-
-These are pre-release, third-party-built PHP packages. `smoke-test`
-(and your own `tests/smoke.sh`) is the only safety net before a build
-is published. Be deliberate about which servers you install these on.
+- Initial project setup: Debian packaging adopted from `debian/main/8.5`
+- Fixed 11 Debian patches for PHP 8.6.0beta1 API changes
+- Fixed session.save_path default to `/var/lib/php/sessions`
+- Fixed lintian: removed dh-systemd (not on Ubuntu 22.04)
+- Fixed CI: chmod +x on shtool/config-stubs/gen_stub.php, --enable-pic, Node 24 env
+- Fixed CI: hidden files in upload-artifact, ppa:ondrej/php in smoke-test, PGDG repo
+- Fixed CI: apt retries/timeouts, bypass flaky azure.archive.ubuntu.com mirror
+- Switched from branch-based apt repo to GitHub Releases
+- Integrated PECL extension building into main workflow (8 extensions)
+- Fixed PECL: checkinstall --install=no, file permissions, extension filtering
+- Added extension-checker workflow for fast compile testing
+- Fixed extension-checker: msgpack `\0` sed escape, 3 extension build failures
+- Rewrote PECL builder to clone from official GitHub repos instead of PECL
+- Fixed dpkg-deb version error: extract version from `package.xml` instead of git tags
+- Simplified release tag format: `php8.6.0-beta1-1` (universal for any PHP version)
+- Renamed repo and workflows to be version-agnostic (`build-php.yml`, `php-apt-builder`)
