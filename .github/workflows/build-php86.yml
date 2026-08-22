@@ -841,8 +841,8 @@ jobs:
           set -euxo pipefail
 
           SAFE_VERSION=$(echo "${{ inputs.pkg_upstream_version }}" | tr '~' '-')
-          VERSION_TAG="php${{ inputs.target_series }}-v${SAFE_VERSION}-${{ inputs.pkg_revision }}"
-          RELEASE_NAME="PHP ${{ inputs.target_series }} ${{ inputs.pkg_upstream_version }}-${{ inputs.pkg_revision }}"
+          VERSION_TAG="php${SAFE_VERSION}-${{ inputs.pkg_revision }}"
+          RELEASE_NAME="PHP ${SAFE_VERSION}-${{ inputs.pkg_revision }}"
           SERIES="${{ inputs.target_series }}"
 
           # -----------------------------------------------------------------
