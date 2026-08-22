@@ -10,13 +10,13 @@ name: Bootstrap packaging (run once, not per-build)
 # WHAT IT DOES AND WHY
 # ----------------------------------------------------------------------------
 # Clones the last RELEASED PHP series' real Debian packaging (debian/
-# directory) from salsa.debian.org, mechanically rewrites every "8.5" ->
-# "8.6" in it, and commits the RESULT directly into THIS repo, at
-# packaging/debian/. From that point on, packaging/debian/ already says
-# "8.6" everywhere -- it's yours, tracked in git.
+# directory) from salsa.debian.org, mechanically rewrites the base
+# series -> target series in it, and commits the RESULT directly into
+# THIS repo, at packaging/debian/. From that point on, packaging/debian/
+# already says the target series everywhere -- it's yours, tracked in git.
 #
-# The day-to-day build-php86.yml workflow never talks to salsa.debian.org
-# and never sees the string "8.5" -- it just uses packaging/debian/ as-is.
+# The day-to-day build-php.yml workflow never talks to salsa.debian.org
+# and never sees the base series -- it just uses packaging/debian/ as-is.
 # This mirrors how Sury and Remi Collet actually work: each maintains ONE
 # persistent, version-baked packaging/spec tree in git and evolves it
 # release to release (see Remi's own changelog: 8.4.0~beta1 in Aug 2024
@@ -105,4 +105,4 @@ jobs:
           git commit -m "Adopt php${{ inputs.target_series }} packaging from ${{ steps.find.outputs.base_branch }}" || echo "Nothing changed"
           git push -f origin "${{ inputs.commit_branch }}"
           echo "Now open a PR from ${{ inputs.commit_branch }} into main, review the diff, and merge it."
-          echo "After that, build-php86.yml never needs base_series again."
+          echo "After that, build-php.yml never needs base_series again."
