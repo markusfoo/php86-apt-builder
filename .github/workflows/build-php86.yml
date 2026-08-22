@@ -625,10 +625,15 @@ jobs:
           set -uo pipefail
 
           # ------------------------------------------------------------------
-          # PECL extensions to build.  Add or remove names here; the rest of
-          # the script handles download, compile, and .deb packaging.
+          # PECL extensions to build.
+          #
+          # Only include extensions confirmed to compile against PHP 8.6.
+          # Extensions needing upstream compatibility patches (xdebug, redis,
+          # msgpack, apcu, mongodb, memcached) are commented below -- re-enable
+          # once patches are added in the case block.
           # ------------------------------------------------------------------
-          EXTENSIONS="xdebug redis igbinary msgpack apcu mongodb imagick memcached"
+          EXTENSIONS="igbinary imagick"
+          # EXTENSIONS="xdebug redis igbinary msgpack apcu mongodb imagick memcached"
 
           SERIES="${{ inputs.target_series }}"
           OUT_DIR="$PWD/pecl-builds"
@@ -640,17 +645,19 @@ jobs:
             cd "$WORK"
 
             # --- download ---
-            if ! pecl download "$EXT" 2>/dev/null; then
-              echo "::warning::pecl download failed for $EXT (may not exist or network issue)"
-              rm -rf "$WORK"; echo "::endgroup::"; continue
+            echo "Downloading $EXT ..."
+            if ! pecl download "$EXT" 2>&1; then
+              echo "::warning::pecl download failed for $EXT"
+              rm -rf "$WORK"; echo "::endgroup::"; continue;
             fi
 
             ARCHIVE=$(ls -t "${EXT}"-*.tgz 2>/dev/null | head -1)
             [ -z "$ARCHIVE" ] && { rm -rf "$WORK"; echo "::endgroup::"; continue; }
 
             # --- version from filename: redis-6.1.0.tgz -> 6.1.0 ---
-            EXT_VER=$(echo "$ARCHIVE" | sed -n "s/^${EXT}-\(.*\)\\.tgz$/\\1/p")
+            EXT_VER=$(echo "$ARCHIVE" | sed -n "s/^${EXT}\\(.*)\\.tgz$/\1/p")
             [ -z "$EXT_VER" ] && EXT_VER="0.0.0"
+            echo "Version: $EXT_VER"
 
             tar xzf "$ARCHIVE"
             BDIR=$(ls -d "${EXT}"-* 2>/dev/null | head -1)
@@ -675,8 +682,9 @@ jobs:
             PCONF="/usr/bin/php-config${SERIES}"
             [ ! -x "$PCONF" ] && PCONF="/usr/bin/php-config"
 
-            if ! "$PHPIZE" >/dev/null 2>&1; then
-              echo "::warning::phpize failed for $EXT"
+            echo "Running phpize ..."
+            if ! "$PHPIZE" 2>&1; then
+              echo "::warning::phpize failed for $EXT (see log above)"
               cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
             fi
 
@@ -687,18 +695,21 @@ jobs:
               memcached) CONF_EXTRA="--disable-memcached-sasl" ;;
             esac
 
-            if ! ./configure --with-php-config="$PCONF" $CONF_EXTRA >/dev/null 2>&1; then
-              echo "::warning::configure failed for $EXT"
+            echo "Running configure --with-php-config=$PCONF $CONF_EXTRA ..."
+            if ! ./configure --with-php-config="$PCONF" $CONF_EXTRA 2>&1; then
+              echo "::warning::configure failed for $EXT (see log above)"
               cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
             fi
 
             # --- compile ---
-            if ! make -j"$(nproc)" >/dev/null 2>&1; then
-              echo "::warning::make failed for $EXT (not yet compatible with PHP ${SERIES}?)"
+            echo "Running make -j$(nproc) ..."
+            if ! make -j"$(nproc)" 2>&1; then
+              echo "::warning::make failed for $EXT (see errors above)"
               cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
             fi
 
             # --- package as .deb via checkinstall ---
+            echo "Running checkinstall ..."
             if sudo checkinstall -D \
               --pkgname="php${SERIES}-${EXT}" \
               --pkgversion="$EXT_VER" \
@@ -709,7 +720,7 @@ jobs:
               --nodoc \
               --fstrans=no \
               --backup=no \
-              -y make install >/dev/null 2>&1; then
+              -y make install 2>&1; then
 
               CREATED=$(ls -t *.deb 2>/dev/null | head -1 || true)
               if [ -n "$CREATED" ] && [ -f "$CREATED" ]; then
@@ -719,7 +730,7 @@ jobs:
                 echo "::warning::checkinstall succeeded but no .deb found for $EXT"
               fi
             else
-              echo "::warning::checkinstall failed for $EXT"
+              echo "::warning::checkinstall failed for $EXT (see log above)"
             fi
 
             cd /
