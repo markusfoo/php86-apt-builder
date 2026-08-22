@@ -728,7 +728,7 @@ jobs:
             fi
 
             # --- package as .deb via checkinstall ---
-            echo "Running checkinstall ..."
+            echo "Running checkinstall (pwd: $(pwd)) ..."
             if sudo checkinstall -D \
               --pkgname="php${SERIES}-${EXT}" \
               --pkgversion="$EXT_VER" \
@@ -739,15 +739,24 @@ jobs:
               --nodoc \
               --fstrans=no \
               --backup=no \
+              --install=no \
               -y make install 2>&1; then
 
+              # Look for .deb in CWD first, then search broader
               CREATED=$(ls -t *.deb 2>/dev/null | head -1 || true)
+              if [ -z "$CREATED" ]; then
+                CREATED=$(find "$WORK" -maxdepth 3 -name '*.deb' -print -quit 2>/dev/null || true)
+              fi
+              if [ -z "$CREATED" ]; then
+                CREATED=$(find /tmp -maxdepth 3 -name "php${SERIES}-${EXT}_*.deb" -print -quit 2>/dev/null || true)
+              fi
               if [ -n "$CREATED" ] && [ -f "$CREATED" ]; then
                 mv "$CREATED" "${OUT_DIR}/"
                 PASS=$((PASS+1))
                 echo "  Built: $(basename "$CREATED")"
               else
                 echo "::warning::checkinstall succeeded but no .deb found for $EXT"
+                echo "  pwd=$(pwd)  ls=$(ls *.deb 2>&1 || true)"
                 FAIL=$((FAIL+1))
               fi
             else
