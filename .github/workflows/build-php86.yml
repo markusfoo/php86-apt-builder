@@ -670,13 +670,21 @@ jobs:
             fi
             cd src
 
-            # --- version from git tag ---
-            EXT_VER=$(git describe --tags 2>/dev/null | sed 's/^v//' || git rev-parse --short HEAD)
-            # Debian version MUST start with a digit; prefix commit hashes with 0.0.0+
-            case "$EXT_VER" in
-              [0-9]*) ;;
-              *) EXT_VER="0.0.0+${EXT_VER}" ;;
-            esac
+            # --- version from package source (not git tags) ---
+            if [ -f package.xml ]; then
+              EXT_VER=$(grep -oP '<version>\K[^<]+' package.xml | head -1)
+            fi
+            if [ -z "$EXT_VER" ]; then
+              HEADER=$(find . -maxdepth 2 -name 'php_*.h' | head -1)
+              [ -n "$HEADER" ] && EXT_VER=$(grep -oP 'PHP_\w+_VERSION\s+"?\K[^"]+' "$HEADER" | head -1)
+            fi
+            if [ -z "$EXT_VER" ]; then
+              EXT_VER=$(git describe --tags 2>/dev/null | sed 's/^v//')
+            fi
+            if [ -z "$EXT_VER" ]; then
+              EXT_VER="0.0.0~$(git rev-parse --short HEAD)"
+            fi
+            [[ ! "$EXT_VER" =~ ^[0-9] ]] && EXT_VER="0.0.0~${EXT_VER}"
             echo "Version: $EXT_VER"
 
             # --- apply PHP 8.6 compatibility patches ---

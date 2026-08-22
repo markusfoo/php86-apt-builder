@@ -147,8 +147,20 @@ jobs:
             fi
             cd src
 
-            # --- version from git ---
-            EXT_VER=$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)
+            # --- version from package source (not git tags) ---
+            if [ -f package.xml ]; then
+              EXT_VER=$(grep -oP '<version>\K[^<]+' package.xml | head -1)
+            fi
+            if [ -z "$EXT_VER" ]; then
+              HEADER=$(find . -maxdepth 2 -name 'php_*.h' | head -1)
+              [ -n "$HEADER" ] && EXT_VER=$(grep -oP 'PHP_\w+_VERSION\s+"?\K[^"]+' "$HEADER" | head -1)
+            fi
+            if [ -z "$EXT_VER" ]; then
+              EXT_VER=$(git describe --tags 2>/dev/null | sed 's/^v//')
+            fi
+            if [ -z "$EXT_VER" ]; then
+              EXT_VER=$(git rev-parse --short HEAD)
+            fi
             echo "Version: $EXT_VER"
 
             # --- apply PHP 8.6 compatibility patches ---
