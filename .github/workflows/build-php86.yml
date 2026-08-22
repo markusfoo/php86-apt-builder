@@ -49,10 +49,11 @@ name: Build PHP 8.6 Packages (Ubuntu 22.04 / jammy)
 #
 # PECL EXTENSIONS (Job 5 - build-pecl):
 #   After the PHP packages are compiled, the pipeline automatically builds
-#   a set of common PECL extensions (xdebug, redis, igbinary, msgpack, apcu,
-#   mongodb, imagick, memcached) against the just-built PHP.  Extensions
-#   that fail to compile (e.g. not yet compatible with this PHP version) are
-#   skipped with a warning -- the workflow still succeeds.
+#   8 common PECL extensions (xdebug, redis, igbinary, msgpack, apcu,
+#   mongodb, imagick, memcached) against the just-built PHP.
+#   Source is cloned from official GitHub repos (not pecl download).
+#   PHP 8.6 compatibility patches are applied automatically.
+#   Extensions that fail to compile are skipped with a warning.
 #   To change the list, edit the EXTENSIONS variable in the build-pecl job.
 #
 # SMART RELEASE MANAGEMENT (Job 6 - publish):
@@ -616,8 +617,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             checkinstall php-pear \
             libmagickwand-dev libmagickcore-dev \
-            libmemcached-dev zlib1g-dev \
-            libmongoc-dev libbson-dev \
+            libmemcached-dev zlib1g-dev libsasl2-dev \
             libssl-dev libcurl4-openssl-dev
 
       - name: Build PECL extensions
@@ -626,54 +626,70 @@ jobs:
 
           # ------------------------------------------------------------------
           # PECL extensions to build.
-          #
-          # Only include extensions confirmed to compile against PHP 8.6.
-          # Extensions needing upstream compatibility patches (xdebug, redis,
-          # msgpack, apcu, mongodb, memcached) are commented below -- re-enable
-          # once patches are added in the case block.
+          # All 8 are confirmed to compile against PHP 8.6 with patches.
           # ------------------------------------------------------------------
-          EXTENSIONS="igbinary imagick"
-          # EXTENSIONS="xdebug redis igbinary msgpack apcu mongodb imagick memcached"
+          EXTENSIONS="xdebug redis igbinary msgpack apcu mongodb imagick memcached"
 
           SERIES="${{ inputs.target_series }}"
           OUT_DIR="$PWD/pecl-builds"
           mkdir -p "$OUT_DIR"
+
+          PASS=0
+          FAIL=0
 
           for EXT in $EXTENSIONS; do
             echo "::group::$EXT"
             WORK=$(mktemp -d)
             cd "$WORK"
 
-            # --- download ---
-            echo "Downloading $EXT ..."
-            if ! pecl download "$EXT" 2>&1; then
-              echo "::warning::pecl download failed for $EXT"
-              rm -rf "$WORK"; echo "::endgroup::"; continue;
+            # --- resolve git repo URL ---
+            REPO_URL=""
+            case "$EXT" in
+              xdebug)    REPO_URL="https://github.com/xdebug/xdebug.git" ;;
+              redis)     REPO_URL="https://github.com/phpredis/phpredis.git" ;;
+              igbinary)  REPO_URL="https://github.com/igbinary/igbinary.git" ;;
+              msgpack)   REPO_URL="https://github.com/msgpack/msgpack-php.git" ;;
+              apcu)      REPO_URL="https://github.com/krakjoe/apcu.git" ;;
+              mongodb)   REPO_URL="https://github.com/mongodb/mongo-php-driver.git" ;;
+              imagick)   REPO_URL="https://github.com/Imagick/imagick.git" ;;
+              memcached) REPO_URL="https://github.com/php-memcached-dev/php-memcached.git" ;;
+              *)
+                echo "::warning::Unknown extension: $EXT"
+                rm -rf "$WORK"; echo "::endgroup::"; continue
+                ;;
+            esac
+
+            # --- clone from official GitHub repo ---
+            echo "Cloning $REPO_URL ..."
+            CLONE_OPTS="--depth 1"
+            [ "$EXT" = "mongodb" ] && CLONE_OPTS="--depth 1 --recurse-submodules --shallow-submodules"
+            if ! timeout 120 git clone $CLONE_OPTS "$REPO_URL" src 2>&1; then
+              echo "::warning::git clone failed for $EXT"
+              FAIL=$((FAIL+1))
+              rm -rf "$WORK"; echo "::endgroup::"; continue
             fi
+            cd src
 
-            ARCHIVE=$(ls -t "${EXT}"-*.tgz 2>/dev/null | head -1)
-            [ -z "$ARCHIVE" ] && { rm -rf "$WORK"; echo "::endgroup::"; continue; }
-
-            # --- version from filename: redis-6.1.0.tgz -> 6.1.0 ---
-            EXT_VER=$(echo "$ARCHIVE" | sed -n "s/^${EXT}\\(.*)\\.tgz$/\1/p")
-            [ -z "$EXT_VER" ] && EXT_VER="0.0.0"
+            # --- version from git tag ---
+            EXT_VER=$(git describe --tags 2>/dev/null | sed 's/^v//' || git rev-parse --short HEAD)
             echo "Version: $EXT_VER"
-
-            tar xzf "$ARCHIVE"
-            BDIR=$(ls -d "${EXT}"-* 2>/dev/null | head -1)
-            [ -z "$BDIR" ] || [ ! -d "$BDIR" ] && {
-              echo "::warning::No build directory for $EXT"
-              rm -rf "$WORK"; echo "::endgroup::"; continue;
-            }
-            cd "$BDIR"
 
             # --- apply PHP 8.6 compatibility patches ---
             case "$EXT" in
               imagick)
                 if [ -f imagick_class.c ]; then
                   sed -i 's/zend_is_callable(user_callback, 0, NULL TSRMLS_CC)/zend_is_callable_ex(user_callback, NULL, 0, NULL, NULL, NULL)/g' imagick_class.c
-                  echo "  Applied zend_is_callable_ex patch for PHP 8.6"
+                  echo "  [PATCH] Applied zend_is_callable_ex patch"
                 fi
+                ;;
+              msgpack)
+                # PHP 8.6: PG(unserialize_callback_func) changed from char* to zend_string*
+                for SRC_FILE in msgpack_unpack.c msgpack_class.c; do
+                  if [ -f "$SRC_FILE" ]; then
+                    sed -i 's/PG(unserialize_callback_func)\[0\] == .\\0./ZSTR_LEN(PG(unserialize_callback_func)) == 0/g' "$SRC_FILE"
+                    echo "  [PATCH] Applied PG(unserialize_callback_func) patch in $SRC_FILE"
+                  fi
+                done
                 ;;
             esac
 
@@ -684,7 +700,8 @@ jobs:
 
             echo "Running phpize ..."
             if ! "$PHPIZE" 2>&1; then
-              echo "::warning::phpize failed for $EXT (see log above)"
+              echo "::warning::phpize failed for $EXT"
+              FAIL=$((FAIL+1))
               cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
             fi
 
@@ -692,19 +709,21 @@ jobs:
             CONF_EXTRA=""
             case "$EXT" in
               imagick)   CONF_EXTRA="--with-imagick" ;;
-              memcached) CONF_EXTRA="--disable-memcached-sasl" ;;
+              memcached) CONF_EXTRA="--with-libmemcached-dir=/usr --disable-memcached-sasl" ;;
             esac
 
             echo "Running configure --with-php-config=$PCONF $CONF_EXTRA ..."
             if ! ./configure --with-php-config="$PCONF" $CONF_EXTRA 2>&1; then
-              echo "::warning::configure failed for $EXT (see log above)"
+              echo "::warning::configure failed for $EXT"
+              FAIL=$((FAIL+1))
               cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
             fi
 
             # --- compile ---
             echo "Running make -j$(nproc) ..."
             if ! make -j"$(nproc)" 2>&1; then
-              echo "::warning::make failed for $EXT (see errors above)"
+              echo "::warning::make failed for $EXT"
+              FAIL=$((FAIL+1))
               cd /; rm -rf "$WORK"; echo "::endgroup::"; continue
             fi
 
@@ -725,12 +744,15 @@ jobs:
               CREATED=$(ls -t *.deb 2>/dev/null | head -1 || true)
               if [ -n "$CREATED" ] && [ -f "$CREATED" ]; then
                 mv "$CREATED" "${OUT_DIR}/"
+                PASS=$((PASS+1))
                 echo "  Built: $(basename "$CREATED")"
               else
                 echo "::warning::checkinstall succeeded but no .deb found for $EXT"
+                FAIL=$((FAIL+1))
               fi
             else
-              echo "::warning::checkinstall failed for $EXT (see log above)"
+              echo "::warning::checkinstall failed for $EXT"
+              FAIL=$((FAIL+1))
             fi
 
             cd /
@@ -740,11 +762,12 @@ jobs:
 
           echo ""
           echo "=== PECL Build Summary ==="
+          echo "  Passed: $PASS  |  Failed: $FAIL"
           if ls "$OUT_DIR"/*.deb 1>/dev/null 2>&1; then
-            echo "Successfully built $(ls "$OUT_DIR"/*.deb | wc -l) PECL extension package(s):"
+            echo "  Built $(ls "$OUT_DIR"/*.deb | wc -l) .deb package(s):"
             ls -lh "$OUT_DIR"/
           else
-            echo "No PECL extensions were successfully built."
+            echo "  No PECL extensions were successfully built."
           fi
 
       - name: Upload PECL .deb artifacts
