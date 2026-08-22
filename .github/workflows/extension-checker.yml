@@ -59,16 +59,16 @@ jobs:
       # ----------------------------------------------------------------
       - name: Install PHP 8.6 and PECL build deps
         run: |
-          set -euo pipefail
+          set -eo pipefail
 
           # CI reliability
           sudo tee /etc/apt/apt.conf.d/99-ci-network >/dev/null <<'EOF'
-          Acquire::Retries "3";
-          Acquire::http::Timeout "15";
-          Acquire::https::Timeout "15";
-          Acquire::ForceIPv4 "true";
-          APT::Get::Assume-Yes "true";
-          EOF
+Acquire::Retries "3";
+Acquire::http::Timeout "15";
+Acquire::https::Timeout "15";
+Acquire::ForceIPv4 "true";
+APT::Get::Assume-Yes "true";
+EOF
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/azure-cli.list
           if [ -f /etc/apt/apt-mirrors.txt ]; then
             echo "https://archive.ubuntu.com/ubuntu" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
@@ -94,7 +94,7 @@ jobs:
 
           echo "=== PHP 8.6 installed ==="
           php8.6 -v
-          php8.6 -m | head -20
+          php8.6 -m | head -20 || true
 
       # ----------------------------------------------------------------
       # Test each extension
